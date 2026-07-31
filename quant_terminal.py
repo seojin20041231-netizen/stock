@@ -78,13 +78,19 @@ if ticker:
             df['Direction'] = np.sign(df['Close'].diff())
             df['OBV'] = (df['Direction'] * df['Volume']).fillna(0).cumsum()
 
+            # MFI 연산 (0 나누기 예외 처리 보완)
             money_flow = df['Typical_Price'] * df['Volume']
             pf = np.where(df['Typical_Price'] > df['Typical_Price'].shift(1), money_flow, 0)
             nf = np.where(df['Typical_Price'] < df['Typical_Price'].shift(1), money_flow, 0)
             pf_sum = pd.Series(pf, index=df.index).rolling(14).sum()
             nf_sum = pd.Series(nf, index=df.index).rolling(14).sum()
-            df['MFI'] = 100 - (100 / (1 + pf_sum / nf_sum))
-            df['MFI'].fillna(50, inplace=True)
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                mfi_ratio = pf_sum / nf_sum
+                mfi_calc = 100 - (100 / (1 + mfi_ratio))
+                mfi_calc = mfi_calc.fillna(50)
+                mfi_calc[nf_sum == 0] = 100
+                df['MFI'] = mfi_calc
 
             recent_df = df.tail(300)
             hist, bins = np.histogram(recent_df['Close'], bins=30, weights=recent_df['Volume'])
@@ -152,7 +158,7 @@ if ticker:
                 st.markdown(f'<div class="card"><div class="title-text">단기 포지션 방향</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
 
             # ==========================================
-            # 5. [핵심] AI 자동 리스크 판별 로직 (V3)
+            # 5. [핵심] AI 자동 리스크 판별 및 수량 계산 (수정됨)
             # ==========================================
             capital = 1000.0  # 자산 1000달러 고정
             recent_15_low = df['Low'].tail(15).min()
@@ -162,7 +168,6 @@ if ticker:
             is_strong_pattern = current['Liq_Sweep_Bull'] or current['Bull_Pin'] or current['Bull_Engulf']
             is_short = "숏" in position
             
-            # AI 시나리오 변수 초기화
             trade_mode = ""
             auto_risk_pct = 0.0
             target_1_pct = 0.0
@@ -170,53 +175,55 @@ if ticker:
             mode_color = ""
 
             if is_short:
-                # 숏(매도)일 때의 로직
                 if not is_macro_bull and current['MFI'] > 70 and c_price < c_vwap:
                     trade_mode = "🔥 완벽한 하방 추세 (High Risk / 10% 스윙)"
-                    auto_risk_pct = 5.0    # 5% 리스크 감수
-                    target_1_pct = 0.05    # 5% 하락 목표
-                    target_2_pct = 0.10    # 10% 하락 목표
+                    auto_risk_pct = 5.0
+                    target_1_pct = 0.05
+                    target_2_pct = 0.10
                     mode_color = "#e91e63"
                 else:
                     trade_mode = "⚡ 짧은 조정 단타 (Low Risk / 3% 스캘핑)"
-                    auto_risk_pct = 1.5    # 1.5% 리스크로 방어
-                    target_1_pct = 0.015   # 1.5% 하락 목표
-                    target_2_pct = 0.03    # 3% 하락 목표
+                    auto_risk_pct = 1.5
+                    target_1_pct = 0.015
+                    target_2_pct = 0.03
                     mode_color = "#ff9800"
             else:
-                # 롱(매수)일 때의 로직
                 if is_macro_bull and is_strong_pattern and c_price > c_vwap:
                     trade_mode = "🔥 확실한 추세 전환 (High Risk / 10% 스윙)"
-                    auto_risk_pct = 5.0    # 5% 리스크 감수 ($50 손절)
-                    target_1_pct = 0.05    # 5% 수익 목표
-                    target_2_pct = 0.10    # 10% 이상 수익 목표
+                    auto_risk_pct = 5.0
+                    target_1_pct = 0.05
+                    target_2_pct = 0.10
                     mode_color = "#9c27b0"
                 else:
                     trade_mode = "⚡ 짧게 먹고 나오는 반등 단타 (Low Risk / 3% 스캘핑)"
-                    auto_risk_pct = 1.5    # 1.5% 리스크 감수 ($15 손절)
-                    target_1_pct = 0.015   # 1.5% 수익 목표
-                    target_2_pct = 0.03    # 3% 수익 목표
+                    auto_risk_pct = 1.5
+                    target_1_pct = 0.015
+                    target_2_pct = 0.03
                     mode_color = "#03a9f4"
 
-            # 진입가, 익절가, 손절가 계산 (롱/숏 방향에 맞춰 퍼센트 증감)
+            # 진입가, 익절가, 손절가 계산
             if is_short:
                 entry_point = poc_price if c_price < poc_price else c_vwap
                 target_1 = entry_point * (1 - target_1_pct)
                 target_2 = entry_point * (1 - target_2_pct)
-                # 손절가는 ATR 기반과 최근 고점 중 더 높은(안전한) 가격
                 stop_loss = max(entry_point + (c_atr * 1.5), recent_15_high)
             else:
                 base_entry = poc_price if c_price > poc_price else c_vwap
                 entry_point = min(base_entry, c_price)
                 target_1 = entry_point * (1 + target_1_pct)
                 target_2 = entry_point * (1 + target_2_pct)
-                # 손절가는 ATR 기반과 최근 저점 중 더 낮은(안전한) 가격
                 stop_loss = min(entry_point - (c_atr * 1.5), recent_15_low)
                 
-            # 리스크 기반 포지션 사이징 계산
+            # [수정] 구매력(Capital) 한도를 고려한 포지션 수량 계산
             risk_amount = capital * (auto_risk_pct / 100.0)
             price_diff = abs(entry_point - stop_loss)
-            shares_to_buy = int(risk_amount / price_diff) if price_diff > 0 else 0
+
+            if price_diff > 0 and entry_point > 0:
+                ideal_shares = int(risk_amount / price_diff)
+                max_affordable_shares = int(capital / entry_point)  # 총 자산 $1,000 내 구매 가능한 최대 주수
+                shares_to_buy = min(ideal_shares, max_affordable_shares)
+            else:
+                shares_to_buy = 0
 
             # ==========================================
             # 6. UI: AI 전략 및 매매 시나리오 시트
@@ -244,8 +251,8 @@ if ticker:
                 st.markdown(f"""
                 <div class="card" style="border-top: 3px solid #42a5f5;">
                     <h4 style="color:#42a5f5;">🔵 파동 익절 (Target)</h4>
-                    <p style="margin:0; font-size:18px;">1차 ({target_1_pct*100}%): <b>${target_1:.2f}</b></p>
-                    <p style="margin:5px 0 0 0; font-size:18px;">2차 ({target_2_pct*100}%): <b>${target_2:.2f}</b></p>
+                    <p style="margin:0; font-size:18px;">1차 ({target_1_pct*100:.1f}%): <b>${target_1:.2f}</b></p>
+                    <p style="margin:5px 0 0 0; font-size:18px;">2차 ({target_2_pct*100:.1f}%): <b>${target_2:.2f}</b></p>
                 </div>
                 """, unsafe_allow_html=True)
             with c3:
