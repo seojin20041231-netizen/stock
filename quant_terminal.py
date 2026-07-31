@@ -12,22 +12,21 @@ from bs4 import BeautifulSoup
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 0. 디스코드 웹훅 전송 함수
+# 0. 디스코드 웹훅 전송 함수 (롱 전용 컬러)
 # ==========================================
 def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
     if not webhook_url: return
     
-    color = 15158332 if "숏" in mode else 3066993
     embed = {
-        "title": f"🚨 {ticker} {mode} 시그널 포착!",
-        "color": color,
+        "title": f"🚀 {ticker} {mode} 시그널 포착!",
+        "color": 3066993, # 초록색 고정
         "fields": [
             {"name": "진입가 (Entry)", "value": f"${entry:.2f}", "inline": False},
             {"name": "목표가 1 (TP1)", "value": f"${tp1:.2f}", "inline": True},
             {"name": "목표가 2 (TP2)", "value": f"${tp2:.2f}", "inline": True},
             {"name": "손절가 (SL)", "value": f"${sl:.2f}", "inline": False},
         ],
-        "footer": {"text": "Ultimate Quant Terminal V5.5 (Live Radar)"}
+        "footer": {"text": "Ultimate Quant Terminal V5.5 (Long-Only)"}
     }
     try:
         requests.post(webhook_url, json={"embeds": [embed]})
@@ -35,7 +34,7 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
         st.sidebar.error(f"알림 전송 실패: {e}")
 
 # ==========================================
-# 1. 감시 종목 대폭 확장 (섹터별 핵심 주도주 60선 + 크롤링)
+# 1. 감시 종목 (섹터별 핵심 주도주 60선 + 크롤링)
 # ==========================================
 @st.cache_data(ttl=600)
 def get_dynamic_market_leaders():
@@ -48,7 +47,7 @@ def get_dynamic_market_leaders():
     
     robust_universe = mega_tech + semiconductors + crypto_meme + ai_software + ev_energy + finance_others
     
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     url = 'https://finance.yahoo.com/most-active'
     
     try:
@@ -69,7 +68,7 @@ def get_dynamic_market_leaders():
         return robust_universe[:65]
 
 # ==========================================
-# 2. 동적 시장 스캐너 (Sidebar 용)
+# 2. 동적 시장 스캐너
 # ==========================================
 @st.cache_data(ttl=300)
 def get_v5_dynamic_screener(universe):
@@ -87,7 +86,7 @@ def get_v5_dynamic_screener(universe):
             gap_pct = ((hist['Open'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2]) * 100
             
             if rvol > 1.2 or atr_pct > 3.0 or abs(gap_pct) > 1.5:
-                score = (rvol * 8) + (atr_pct * 2) + abs(gap_pct)
+                score = (rvol * 8) + (atr_pct * 2) + gap_pct # 롱 관점이므로 gap 절대값 해제
                 results.append({"티커": t, "Gap(%)": gap_pct, "RVOL": rvol, "ATR(%)": atr_pct, "세력점수": score})
         except: continue
             
@@ -96,7 +95,7 @@ def get_v5_dynamic_screener(universe):
     return df_res
 
 # ==========================================
-# 3. 다관점 4중 레이더 (조건 완화 + Series 에러 픽스)
+# 3. 다관점 4중 레이더 (매수 관점 위주)
 # ==========================================
 @st.cache_data(ttl=60)
 def scan_multi_perspective_radar(universe):
@@ -119,7 +118,6 @@ def scan_multi_perspective_radar(universe):
             df['CVD'] = df.groupby('Date_NY')['Volume_Delta'].cumsum()
             df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
             
-            # Series 에러 방지: iloc[-1]로 단일 값(scalar) 추출
             recent_20_low_val = df['Low'].rolling(20).min().shift(1).iloc[-1]
             recent_20_high_val = df['High'].rolling(20).max().shift(1).iloc[-1]
             
@@ -127,16 +125,14 @@ def scan_multi_perspective_radar(universe):
             c_price = curr['Close']
             c_vwap = curr['VWAP']
             
-            # 1. 수급 유입 (2배)
-            if curr['Volume'] > (curr['Vol_SMA20'] * 2.0):
-                dir_color = "상승 🟢" if curr['Close'] > curr['Open'] else "하락 🔴"
-                radar_results.append({"포착 관점": f"🐋 단기 수급 유입 ({dir_color})", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"평균 대비 {(curr['Volume']/curr['Vol_SMA20']):.1f}배 거래량 터짐"})
+            # 1. 롱 수급 유입
+            if curr['Volume'] > (curr['Vol_SMA20'] * 2.0) and curr['Close'] > curr['Open']:
+                radar_results.append({"포착 관점": "🐋 단기 매수 수급 유입 🟢", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"평균 대비 {(curr['Volume']/curr['Vol_SMA20']):.1f}배 매수 거래량"})
                 
-            # 2. VWAP 눌림목 (0.8%)
+            # 2. VWAP 눌림목
             vwap_dist_pct = abs(c_price - c_vwap) / c_vwap * 100
-            if vwap_dist_pct <= 0.8:
-                cvd_status = "매수 우위" if curr['CVD'] > df.iloc[-2]['CVD'] else "매도 우위"
-                radar_results.append({"포착 관점": "⏳ VWAP 눌림/반등 대기", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"VWAP과 {vwap_dist_pct:.2f}% 차이 ({cvd_status})"})
+            if vwap_dist_pct <= 0.8 and curr['CVD'] > df.iloc[-2]['CVD']:
+                radar_results.append({"포착 관점": "⏳ VWAP 눌림/반등 대기", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"VWAP 지지 및 CVD 상승 중"})
                 
             # 3. V5 정밀 롱
             liq_sweep = (curr['Low'] < recent_20_low_val) and (c_price > recent_20_low_val)
@@ -144,7 +140,7 @@ def scan_multi_perspective_radar(universe):
             if liq_sweep and cvd_rising and (c_price > c_vwap):
                 radar_results.append({"포착 관점": "🚨 V5 정밀 롱 타점", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매물대 스위핑 및 CVD 동의"})
                 
-            # 4. 고점 돌파 모멘텀
+            # 4. 롱 고점 돌파
             if (c_price > recent_20_high_val) and (curr['Volume_Delta'] > 0):
                 radar_results.append({"포착 관점": "📈 단기 고점 돌파 (모멘텀)", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매수세 유입 동반 단기 고점 돌파"})
                 
@@ -159,7 +155,7 @@ def scan_multi_perspective_radar(universe):
 # ==========================================
 # 4. 터미널 UI 및 메인 로직
 # ==========================================
-st.set_page_config(page_title="Ultimate Quant Terminal V5.5", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Ultimate Quant Terminal V5.5 (Long Only)", layout="wide", initial_sidebar_state="expanded")
 
 if 'last_alert_time' not in st.session_state:
     st.session_state.last_alert_time = {}
@@ -180,8 +176,8 @@ st.markdown("""
 live_universe = get_dynamic_market_leaders()
 
 with st.sidebar:
-    st.header("⚙️ V5.5 마스터 설정")
-    st.info(f"🔒 총 자산: **$1,000**\n🚀 AI 주도주 크롤링 탑재 (현재 감시: {len(live_universe)}개)\n📊 다관점 4중 레이더망 가동")
+    st.header("⚙️ V5.5 롱 전용 설정")
+    st.info(f"🔒 총 자산: **$1,000**\n🚀 AI 주도주 크롤링 탑재 (현재 감시: {len(live_universe)}개)\n📈 매수(Long) 시그널 전용 모드")
     
     st.markdown("---")
     st.header("🔥 오늘 시장의 주도주 Top 5")
@@ -205,26 +201,26 @@ with st.sidebar:
         time.sleep(60)
         st.rerun()
 
-st.title("👁️‍🗨️ 실전 퀀트 시스템 (V5.5 Final Master)")
+st.title("👁️‍🗨️ 실전 퀀트 시스템 (V5.5 매수 전용 Master)")
 
 col1, col2 = st.columns([1, 3])
 with col1:
     default_ticker = df_hot.iloc[0]['티커'] if not df_hot.empty else "TSLA"
     ticker = st.text_input("상세 분석 티커 입력 (예: NVDA)", value=default_ticker).upper().strip()
 
-tab_radar, tab_detail, tab_backtest = st.tabs(["🎯 실시간 4중 레이더망", "👁️‍🗨️ 종목별 세부 X-Ray", "🔄 백테스팅 시뮬레이터"])
+tab_radar, tab_detail = st.tabs(["🎯 실시간 4중 매수 레이더망", "👁️‍🗨️ 종목별 세부 X-Ray"])
 
 with tab_radar:
-    st.markdown("### ⚡ 다관점 4중 레이더 (Multi-Perspective)")
-    st.caption(f"안정적인 감시를 위해 총 **{len(live_universe)}개**의 주도주 및 급등주를 4가지 관점으로 실시간 스캔합니다.")
+    st.markdown("### ⚡ 매수 전용 4중 레이더 (Long-Only)")
+    st.caption(f"안정적인 감시를 위해 총 **{len(live_universe)}개**의 주도주를 오직 **상승(매수) 관점**으로만 스캔합니다.")
     
-    with st.spinner("레이더망으로 전 시장 감시 중..."):
+    with st.spinner("매수 타점 레이더망 가동 중..."):
         df_radar = scan_multi_perspective_radar(live_universe)
         if not df_radar.empty:
-            st.success(f"🔥 총 **{len(df_radar)}건**의 특이 동향이 포착되었습니다!")
+            st.success(f"🔥 총 **{len(df_radar)}건**의 롱(매수) 유력 동향이 포착되었습니다!")
             st.dataframe(df_radar, use_container_width=True, hide_index=True)
         else:
-            st.warning("⏳ 현재 포착된 종목이 없습니다.")
+            st.warning("⏳ 현재 확실한 매수 타점에 진입한 종목이 없습니다.")
 
 if ticker:
     with tab_detail:
@@ -263,7 +259,6 @@ if ticker:
                     df['CVD'] = df.groupby('Date_NY')['Volume_Delta'].cumsum()
                     df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
 
-                    # 🔥 에러 픽스: .iloc[-1]을 사용하여 단일 값으로 추출
                     recent_20_low_1m_val = df['Low'].rolling(20).min().shift(1).iloc[-1]
                     recent_20_high_1m_val = df['High'].rolling(20).max().shift(1).iloc[-1]
 
@@ -288,26 +283,25 @@ if ticker:
                     elif m_chop > 61.8:
                         alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다. 박스권 대응을 권장합니다.</div>')
 
-                    # 🎯 로직 동기화 및 조건문 픽스
+                    # ==========================================
+                    # 🎯 매수(Long) 전용 타점 로직 (숏 완전 삭제)
+                    # ==========================================
                     vwap_dist_pct = abs(c_price - c_vwap) / c_vwap * 100
                     cvd_rising = current['CVD'] > df['CVD'].iloc[-2]
                     vol_burst = current['Volume'] > (current['Vol_SMA20'] * 2.0)
                     breakout = (c_price > recent_20_high_1m_val) and (current['Volume_Delta'] > 0)
 
-                    if vwap_dist_pct <= 0.8:
-                        if c_price >= c_vwap and cvd_rising:
-                            position = "롱(매수) 진입 🟢"
-                            signal_reason = "VWAP 상단 지지 및 CVD 매수 우위"
-                        elif c_price < c_vwap and not cvd_rising:
-                            position = "숏(매도) 진입 🔴"
-                            signal_reason = "VWAP 하단 저항 및 CVD 매도 우위"
-                    elif vol_burst or breakout:
-                        if current['Close'] > current['Open']:
-                            position = "롱(매수) 진입 🟢"
-                            signal_reason = "강한 매수 수급 유입 / 단기 고점 돌파"
-                        else:
-                            position = "숏(매도) 진입 🔴"
-                            signal_reason = "강한 매도 수급 유입 / 단기 저점 이탈"
+                    # 1. VWAP 반등/눌림목 조건 (매수만)
+                    if vwap_dist_pct <= 0.8 and c_price >= c_vwap and cvd_rising:
+                        position = "롱(매수) 진입 🟢"
+                        signal_reason = "VWAP 상단 지지 및 CVD 매수 우위"
+                    
+                    # 2. 거래량 폭발 / 모멘텀 돌파 조건 (매수만)
+                    elif (vol_burst or breakout) and current['Close'] > current['Open'] and current['Volume_Delta'] > 0:
+                        position = "롱(매수) 진입 🟢"
+                        signal_reason = "강한 매수 수급 유입 / 단기 고점 돌파"
+                    
+                    # 3. V5 정밀 롱 스위핑 조건
                     elif (current['Low'] < recent_20_low_1m_val) and (c_price > recent_20_low_1m_val) and (c_price > c_vwap):
                         position = "롱(매수) 진입 🟢"
                         signal_reason = "매물대 Liquidity Sweep 완료 후 반등"
@@ -315,7 +309,6 @@ if ticker:
                     for alert in alerts: st.markdown(alert, unsafe_allow_html=True)
                     
                     capital = 1000.0
-                    is_short_pos = "숏" in position
                     is_active_signal = (position != "관망 ⏳") and not is_market_open_noise
                     
                     if not is_active_signal:
@@ -324,14 +317,13 @@ if ticker:
                         m_atr = current['macro_atr'] if pd.notna(current['macro_atr']) and current['macro_atr'] > 0 else (c_price * 0.005)
                         entry_point = c_price
                         
-                        if is_short_pos: stop_loss = entry_point + (m_atr * 1.5)
-                        else: stop_loss = entry_point - (m_atr * 1.5)
-                        
+                        # 롱 전용 목표가/손절가 계산 로직
+                        stop_loss = entry_point - (m_atr * 1.5)
                         risk_per_share = abs(entry_point - stop_loss)
                         sl_pct = (risk_per_share / entry_point) * 100 if entry_point > 0 else 0
                         
-                        target_1 = entry_point - (risk_per_share * 1.2) if is_short_pos else entry_point + (risk_per_share * 1.2)
-                        target_2 = entry_point - (risk_per_share * 2.0) if is_short_pos else entry_point + (risk_per_share * 2.0)
+                        target_1 = entry_point + (risk_per_share * 1.2)
+                        target_2 = entry_point + (risk_per_share * 2.0)
                         shares_to_buy = min(int((capital * 0.02) / risk_per_share), int(capital / entry_point)) if risk_per_share > 0 else 0
 
                         last_time_str = str(df.index[-1])
@@ -344,12 +336,12 @@ if ticker:
                     with m1: st.markdown(f'<div class="card"><div class="title-text">현재가</div><div class="value-text {"up" if len(df) > 1 and c_price >= df.iloc[-2]["Close"] else "down"}">${c_price:.2f}</div></div>', unsafe_allow_html=True)
                     with m2: st.markdown(f'<div class="card"><div class="title-text">CVD (체결강도)</div><div class="value-text {"up" if current["CVD"] > 0 else "down"}">{current["CVD"]:,.0f}</div></div>', unsafe_allow_html=True)
                     with m3: st.markdown(f'<div class="card"><div class="title-text">세션 POC</div><div class="value-text neutral">${session_poc:.2f}</div></div>', unsafe_allow_html=True)
-                    with m4: st.markdown(f'<div class="card"><div class="title-text">상태</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
+                    with m4: st.markdown(f'<div class="card"><div class="title-text">상태</div><div class="value-text {"up" if "롱" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
 
                     c1, c2, c3 = st.columns(3)
                     with c1: 
-                        if entry_point > 0: st.markdown(f'<div class="card" style="border-top: 3px solid {"#ef5350" if is_short_pos else "#26a69a"};"><h4 style="color:{"#ef5350" if is_short_pos else "#26a69a"};">{position}</h4><h2 style="margin:0;">${entry_point:.2f}</h2><p style="margin-top:5px; font-size:12px; color:#8a93a6;">{signal_reason}</p><p style="margin-top:5px; font-size:14px; font-weight:bold;">💡 진입 수량: {shares_to_buy} 주</p></div>', unsafe_allow_html=True)
-                        else: st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">관망 (대기 중)</h4><h2 style="margin:0; color:#8a93a6;">-</h2><p style="margin-top:10px; font-size:14px;">조건 성립 대기</p></div>', unsafe_allow_html=True)
+                        if entry_point > 0: st.markdown(f'<div class="card" style="border-top: 3px solid #26a69a;"><h4 style="color:#26a69a;">{position}</h4><h2 style="margin:0;">${entry_point:.2f}</h2><p style="margin-top:5px; font-size:12px; color:#8a93a6;">{signal_reason}</p><p style="margin-top:5px; font-size:14px; font-weight:bold;">💡 진입 수량: {shares_to_buy} 주</p></div>', unsafe_allow_html=True)
+                        else: st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">관망 (대기 중)</h4><h2 style="margin:0; color:#8a93a6;">-</h2><p style="margin-top:10px; font-size:14px;">매수 조건 성립 대기</p></div>', unsafe_allow_html=True)
                     with c2:
                         if entry_point > 0: st.markdown(f'<div class="card" style="border-top: 3px solid #42a5f5;"><h4 style="color:#42a5f5;">🔵 익절 목표가</h4><p style="margin:0; font-size:16px;">1차 (1:1.2): <b>${target_1:.2f}</b></p><p style="margin:5px 0 0 0; font-size:16px;">2차 (1:2.0): <b>${target_2:.2f}</b></p></div>', unsafe_allow_html=True)
                         else: st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">🔵 익절 목표가</h4><h2 style="margin:0; color:#8a93a6;">-</h2></div>', unsafe_allow_html=True)
@@ -372,6 +364,3 @@ if ticker:
                     st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.error(f"데이터 분석 중 오류가 발생했습니다: {e}")
-
-    with tab_backtest:
-        st.info("시뮬레이터 탭에서는 과거 데이터를 바탕으로 한 전략의 승률과 자산 변화 곡선을 제공합니다.")
