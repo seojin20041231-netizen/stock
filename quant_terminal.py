@@ -7,6 +7,7 @@ from plotly.subplots import make_subplots
 import warnings
 import time
 import requests
+from bs4 import BeautifulSoup
 
 warnings.filterwarnings('ignore')
 
@@ -26,7 +27,7 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
             {"name": "목표가 2 (TP2)", "value": f"${tp2:.2f}", "inline": True},
             {"name": "손절가 (SL)", "value": f"${sl:.2f}", "inline": False},
         ],
-        "footer": {"text": "Ultimate Quant Terminal V5.3 (Live Radar)"}
+        "footer": {"text": "Ultimate Quant Terminal V5.4 (Live Radar)"}
     }
     try:
         requests.post(webhook_url, json={"embeds": [embed]})
@@ -34,9 +35,114 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
         st.sidebar.error(f"알림 전송 실패: {e}")
 
 # ==========================================
-# 1. 터미널 UI 및 환경 설정
+# 1. 자동 주도주 크롤링 (Top-Down Pre-filtering)
 # ==========================================
-st.set_page_config(page_title="Ultimate Quant Terminal V5.3", layout="wide", initial_sidebar_state="expanded")
+@st.cache_data(ttl=600) # 10분마다 주도주 리스트 갱신
+def get_dynamic_market_leaders():
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    url = 'https://finance.yahoo.com/most-active'
+    fallback_list = ["NVDA", "TSLA", "AAPL", "MSTR", "AMD", "COIN", "SMCI", "MARA", "PLTR", "ARM", "AMZN", "META"]
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        tickers = []
+        for a in soup.find_all('a', {'data-test': 'quoteLink'}):
+            ticker = a.text.strip()
+            if ticker.isalpha() and len(ticker) <= 5:
+                tickers.append(ticker)
+        unique_tickers = list(dict.fromkeys(tickers))[:40]
+        return unique_tickers if unique_tickers else fallback_list
+    except:
+        return fallback_list
+
+# ==========================================
+# 2. 동적 시장 스캐너 (Sidebar)
+# ==========================================
+@st.cache_data(ttl=300)
+def get_v5_dynamic_screener(universe):
+    results = []
+    # 빠른 사이드바 렌더링을 위해 상위 15개만 스캔
+    for t in universe[:15]:
+        try:
+            stock = yf.Ticker(t)
+            hist = stock.history(period="1mo", interval="1d")
+            if len(hist) < 20: continue
+            
+            hist['TR'] = hist['High'] - hist['Low']
+            atr_pct = (hist['TR'].rolling(14).mean().iloc[-1] / hist['Close'].iloc[-1]) * 100
+            avg_vol = hist['Volume'].iloc[-21:-1].mean()
+            rvol = hist['Volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
+            gap_pct = ((hist['Open'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2]) * 100
+            
+            if rvol > 1.2 or atr_pct > 3.0 or abs(gap_pct) > 1.5:
+                score = (rvol * 8) + (atr_pct * 2) + abs(gap_pct)
+                results.append({"티커": t, "Gap(%)": gap_pct, "RVOL": rvol, "ATR(%)": atr_pct, "세력점수": score})
+        except: continue
+            
+    df_res = pd.DataFrame(results)
+    if not df_res.empty: df_res = df_res.sort_values(by="세력점수", ascending=False).reset_index(drop=True)
+    return df_res
+
+# ==========================================
+# 3. 다관점 3중 레이더 (Multi-Perspective)
+# ==========================================
+@st.cache_data(ttl=60)
+def scan_multi_perspective_radar(universe):
+    radar_results = []
+    for t in universe:
+        try:
+            stock = yf.Ticker(t)
+            df = stock.history(period="2d", interval="1m", prepost=False)
+            if df.empty or len(df) < 30: continue
+            
+            df['NY_Time'] = df.index.tz_convert('America/New_York') if df.index.tzinfo else df.index
+            df['Date_NY'] = df['NY_Time'].dt.date
+            
+            df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
+            df['VWAP'] = df.groupby('Date_NY').apply(lambda x: (x['Typical_Price'] * x['Volume']).cumsum() / x['Volume'].cumsum()).reset_index(level=0, drop=True)
+            
+            hl_diff = np.where((df['High'] - df['Low']) == 0, 1e-5, df['High'] - df['Low'])
+            df['CLV'] = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / hl_diff
+            df['Volume_Delta'] = df['Volume'] * df['CLV']
+            df['CVD'] = df.groupby('Date_NY')['Volume_Delta'].cumsum()
+            df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
+            
+            recent_20_low = df['Low'].rolling(20).min().shift(1)
+            
+            curr = df.iloc[-1]
+            c_price = curr['Close']
+            c_vwap = curr['VWAP']
+            
+            # 관점 1: 거래량 폭발 (고래 개입)
+            if curr['Volume'] > (curr['Vol_SMA20'] * 3.5):
+                dir_color = "상승 🟢" if curr['Close'] > curr['Open'] else "하락 🔴"
+                radar_results.append({"포착 관점": f"🐋 거래량 폭발 ({dir_color})", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"평균 대비 {(curr['Volume']/curr['Vol_SMA20']):.1f}배 거래량 유입"})
+                
+            # 관점 2: 눌림목 임박 (VWAP 근접)
+            vwap_dist_pct = abs(c_price - c_vwap) / c_vwap * 100
+            if vwap_dist_pct <= 0.3:
+                cvd_status = "매수 우위" if curr['CVD'] > df.iloc[-2]['CVD'] else "매도 우위"
+                radar_results.append({"포착 관점": "⏳ VWAP 눌림목 임박", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"VWAP과 {vwap_dist_pct:.2f}% 근접 ({cvd_status})"})
+                
+            # 관점 3: V5 정밀 타점
+            liq_sweep = (curr['Low'] < recent_20_low) and (c_price > recent_20_low)
+            cvd_rising = curr['CVD'] > df['CVD'].rolling(10).min().iloc[-2]
+            
+            if liq_sweep and cvd_rising and (c_price > c_vwap):
+                radar_results.append({"포착 관점": "🚨 V5 정밀 롱 타점", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매물대 스위핑 및 CVD 동의"})
+                
+        except: continue
+            
+    df_radar = pd.DataFrame(radar_results)
+    if not df_radar.empty:
+        df_radar['Rank'] = df_radar['포착 관점'].map(lambda x: 1 if "🚨" in x else (2 if "🐋" in x else 3))
+        df_radar = df_radar.sort_values(by=['Rank', '티커']).drop(columns=['Rank']).reset_index(drop=True)
+    return df_radar
+
+# ==========================================
+# 4. 터미널 UI 및 환경 설정
+# ==========================================
+st.set_page_config(page_title="Ultimate Quant Terminal V5.4", layout="wide", initial_sidebar_state="expanded")
 
 if 'last_alert_time' not in st.session_state:
     st.session_state.last_alert_time = {}
@@ -51,137 +157,20 @@ st.markdown("""
     .alert-box { padding: 12px; border-radius: 6px; margin-top: 10px; margin-bottom: 15px; font-weight: bold; }
     .alert-warning { background-color: rgba(245, 203, 92, 0.1); border-left: 4px solid #f5cb5c; color: #f5cb5c; }
     .alert-info { background-color: rgba(33, 150, 243, 0.1); border-left: 4px solid #2196f3; color: #2196f3; }
-    .ai-decision { background-color: rgba(156, 39, 176, 0.1); border: 1px solid #9c27b0; padding: 15px; border-radius: 8px; margin-bottom: 20px;}
     </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. 동적 시장 스캐너 (Sidebar)
-# ==========================================
-@st.cache_data(ttl=300)
-def get_v5_dynamic_screener():
-    universe = ["NVDA", "TSLA", "MSTR", "AMD", "COIN", "SMCI", "MARA", "PLTR", "ARM", "AAPL", "META", "AMZN", "NFLX", "CRWD", "SOFI", "UBER"]
-    results = []
-    for t in universe:
-        try:
-            stock = yf.Ticker(t)
-            hist = stock.history(period="1mo", interval="1d")
-            if len(hist) < 20: continue
-            
-            hist['TR'] = hist['High'] - hist['Low']
-            atr_pct = (hist['TR'].rolling(14).mean().iloc[-1] / hist['Close'].iloc[-1]) * 100
-            
-            avg_vol = hist['Volume'].iloc[-21:-1].mean()
-            rvol = hist['Volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-            
-            gap_pct = ((hist['Open'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2]) * 100
-            
-            if rvol > 1.2 or atr_pct > 3.0 or abs(gap_pct) > 1.5:
-                score = (rvol * 8) + (atr_pct * 2) + abs(gap_pct)
-                results.append({"티커": t, "Gap(%)": gap_pct, "RVOL": rvol, "ATR(%)": atr_pct, "세력점수": score})
-        except: continue
-            
-    df_res = pd.DataFrame(results)
-    if not df_res.empty: df_res = df_res.sort_values(by="세력점수", ascending=False).reset_index(drop=True)
-    return df_res
+# 전역 주도주 유니버스 호출
+live_universe = get_dynamic_market_leaders()
 
-# ==========================================
-# 3. 실시간 타점 포착 레이더 (Main Radar)
-# ==========================================
-@st.cache_data(ttl=60)
-def scan_live_entry_signals(universe_tickers):
-    active_targets = []
-    for t in universe_tickers:
-        try:
-            stock = yf.Ticker(t)
-            df = stock.history(period="3d", interval="1m", prepost=False)
-            df_15m = stock.history(period="10d", interval="15m", prepost=False)
-            
-            if df.empty or df_15m.empty or len(df) < 30: continue
-            
-            df_15m['TR'] = np.maximum(df_15m['High'] - df_15m['Low'], np.maximum(abs(df_15m['High'] - df_15m['Close'].shift(1)), abs(df_15m['Low'] - df_15m['Close'].shift(1))))
-            df_15m['ATR'] = df_15m['TR'].rolling(14).mean()
-            df_15m['recent_macro_low'] = df_15m['Low'].rolling(15).min()
-            df_15m['recent_macro_high'] = df_15m['High'].rolling(15).max()
-            
-            sum_tr = df_15m['TR'].rolling(14).sum()
-            max_h = df_15m['High'].rolling(14).max()
-            min_l = df_15m['Low'].rolling(14).min()
-            df_15m['macro_CHOP'] = 100 * np.log10(sum_tr / (max_h - min_l + 1e-5)) / np.log10(14)
-            
-            df_15m_shifted = df_15m.shift(1)
-            df_15m_features = df_15m_shifted[['ATR', 'recent_macro_low', 'recent_macro_high', 'macro_CHOP']].rename(
-                columns={'ATR': 'macro_atr', 'recent_macro_low': 'macro_low', 'recent_macro_high': 'macro_high'})
-            df = pd.merge_asof(df, df_15m_features, left_index=True, right_index=True)
-            
-            df['NY_Time'] = df.index.tz_convert('America/New_York') if df.index.tzinfo else df.index
-            df['Date_NY'] = df['NY_Time'].dt.date
-            df['Time_NY'] = df['NY_Time'].dt.time
-            
-            df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
-            df['VWAP'] = df.groupby('Date_NY').apply(lambda x: (x['Typical_Price'] * x['Volume']).cumsum() / x['Volume'].cumsum()).reset_index(level=0, drop=True)
-            
-            hl_diff = np.where((df['High'] - df['Low']) == 0, 1e-5, df['High'] - df['Low'])
-            df['CLV'] = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / hl_diff
-            df['Volume_Delta'] = df['Volume'] * df['CLV']
-            df['CVD'] = df.groupby('Date_NY')['Volume_Delta'].cumsum()
-            
-            money_flow = df['Typical_Price'] * df['Volume']
-            pf = np.where(df['Typical_Price'] > df['Typical_Price'].shift(1), money_flow, 0)
-            nf = np.where(df['Typical_Price'] < df['Typical_Price'].shift(1), money_flow, 0)
-            pf_sum = pd.Series(pf, index=df.index).rolling(14).sum()
-            nf_sum = pd.Series(nf, index=df.index).rolling(14).sum()
-            df['MFI'] = (100 - (100 / (1 + (pf_sum / (nf_sum + 1e-5))))).fillna(50)
-            
-            recent_20_low = df['Low'].rolling(20).min().shift(1)
-            recent_20_high = df['High'].rolling(20).max().shift(1)
-            df['Liq_Sweep_Bull'] = (df['Low'] < recent_20_low) & (df['Close'] > recent_20_low)
-            df['Liq_Sweep_Bear'] = (df['High'] > recent_20_high) & (df['Close'] < recent_20_high)
-            
-            df['Price_LL'] = df['Low'] <= df['Low'].rolling(14).min().shift(1)
-            df['CVD_HL'] = df['CVD'] > df['CVD'].rolling(14).min().shift(1)
-            df['CVD_Bull_Div'] = df['Price_LL'] & df['CVD_HL']
-
-            df['Price_HH'] = df['High'] >= df['High'].rolling(14).max().shift(1)
-            df['CVD_LH'] = df['CVD'] < df['CVD'].rolling(14).max().shift(1)
-            df['CVD_Bear_Div'] = df['Price_HH'] & df['CVD_LH']
-            
-            curr = df.iloc[-1]
-            c_price, c_vwap, m_chop = curr['Close'], curr['VWAP'], curr['macro_CHOP']
-            ny_t = curr['Time_NY']
-            
-            if (ny_t >= pd.to_datetime('09:30').time() and ny_t < pd.to_datetime('09:45').time()) or m_chop > 61.8: continue
-            
-            is_long = (curr['CVD_Bull_Div'] or (curr['Liq_Sweep_Bull'] and curr['MFI'] < 40)) and (c_price > c_vwap) and (curr['Volume_Delta'] > 0)
-            is_short = (curr['CVD_Bear_Div'] or (curr['Liq_Sweep_Bear'] and curr['MFI'] > 60)) and (c_price < c_vwap) and (curr['Volume_Delta'] < 0)
-            
-            if is_long or is_short:
-                direction = "LONG 🟢" if is_long else "SHORT 🔴"
-                m_atr = curr['macro_atr'] if pd.notna(curr['macro_atr']) else 1.0
-                if is_long:
-                    entry = c_price if c_price > (c_vwap * 1.002) else c_vwap
-                    sl = min(curr['macro_low'], entry - (m_atr * 1.5)) if pd.notna(curr['macro_low']) else entry - (m_atr * 1.5)
-                    tp1 = entry + (abs(entry - sl) * 1.2)
-                else:
-                    entry = c_price if c_price < (c_vwap * 0.998) else c_vwap
-                    sl = max(curr['macro_high'], entry + (m_atr * 1.5)) if pd.notna(curr['macro_high']) else entry + (m_atr * 1.5)
-                    tp1 = entry - (abs(entry - sl) * 1.2)
-                    
-                active_targets.append({"티커": t, "포지션": direction, "진입가": f"${entry:.2f}", "목표가(TP1)": f"${tp1:.2f}", "손절가(SL)": f"${sl:.2f}", "현재가": f"${c_price:.2f}"})
-        except: continue
-    return pd.DataFrame(active_targets)
-
-# ==========================================
-# 4. 화면 레이아웃 (사이드바 & 메인 탭)
-# ==========================================
 with st.sidebar:
-    st.header("⚙️ V5.3 마스터 설정")
-    st.info("🔒 총 자산: **$1,000**\n🚀 Live Radar 탑재\n📊 UI/UX 및 미래 참조 오류 보정 완비")
+    st.header("⚙️ V5.4 마스터 설정")
+    st.info("🔒 총 자산: **$1,000**\n🚀 AI 주도주 크롤링 탑재\n📊 다관점 3중 레이더망 가동")
     
     st.markdown("---")
-    st.header("🔥 오늘 세력 개입 Top 5 (동적 스캐너)")
-    with st.spinner("전시장 주도주 스캐닝 중..."):
-        df_hot = get_v5_dynamic_screener()
+    st.header("🔥 오늘 시장의 주도주 Top 5")
+    with st.spinner("야후 파이낸스 실시간 데이터 연동 중..."):
+        df_hot = get_v5_dynamic_screener(live_universe)
         if not df_hot.empty:
             display_df = df_hot.head(5).copy()
             display_df['Gap(%)'] = display_df['Gap(%)'].apply(lambda x: f"{x:+.2f}%")
@@ -200,29 +189,28 @@ with st.sidebar:
         time.sleep(60)
         st.rerun()
 
-st.title("👁️‍🗨️ 실전 퀀트 시스템 (V5.3 Master)")
+st.title("👁️‍🗨️ 실전 퀀트 시스템 (V5.4 Final Master)")
 
 col1, col2 = st.columns([1, 3])
 with col1:
     default_ticker = df_hot.iloc[0]['티커'] if not df_hot.empty else "TSLA"
-    ticker = st.text_input("상세 분석 티커 입력 (예: NVDA, TSLA)", value=default_ticker).upper().strip()
+    ticker = st.text_input("상세 분석 티커 입력 (예: NVDA)", value=default_ticker).upper().strip()
 
 # 탭 구성
-tab_radar, tab_detail, tab_backtest = st.tabs(["🎯 실시간 진입 타점 레이더 (NOW)", "👁️‍🗨️ 종목별 세부 X-Ray", "🔄 백테스팅 시뮬레이터"])
+tab_radar, tab_detail, tab_backtest = st.tabs(["🎯 실시간 3중 레이더망", "👁️‍🗨️ 종목별 세부 X-Ray", "🔄 백테스팅 시뮬레이터"])
 
 with tab_radar:
-    st.markdown("### ⚡ 현재 시각 기준, V5.3 진입 타점 포착 종목")
-    st.caption("감시 유니버스를 실시간 스캔하여 조건(CVD + 스위핑)이 100% 충족된 종목만 띄웁니다.")
-    universe_to_scan = ["NVDA", "TSLA", "MSTR", "AMD", "COIN", "SMCI", "MARA", "PLTR", "ARM", "AAPL", "META", "AMZN", "NFLX", "CRWD"]
+    st.markdown("### ⚡ 다관점 3중 레이더 (Multi-Perspective)")
+    st.caption(f"오늘 시장에서 가장 활발하게 거래되는 상위 {len(live_universe)}개 종목을 크롤링하여 거래량 폭발, 눌림목 대기, 정밀 타점 3가지 관점으로 실시간 감시합니다.")
     
-    with st.spinner("레이더 가동 중..."):
-        df_radar = scan_live_entry_signals(universe_to_scan)
+    with st.spinner("3중 레이더망으로 전 시장 감시 중..."):
+        df_radar = scan_multi_perspective_radar(live_universe)
         if not df_radar.empty:
-            st.success(f"🔥 **{len(df_radar)}개 종목**에서 지금 당장 진입 가능한 타점이 포착되었습니다!")
+            st.success(f"🔥 총 **{len(df_radar)}건**의 특이 동향이 포착되었습니다!")
             st.dataframe(df_radar, use_container_width=True, hide_index=True)
-            st.info("💡 위 티커를 상단 검색창에 입력하여 '종목별 세부 X-Ray' 탭에서 디테일을 확인하세요.")
+            st.info("💡 위 표에서 관심 가는 '티커'를 상단 검색창에 입력해 세부 차트와 타점을 확인하세요.")
         else:
-            st.warning("⏳ 현재 시점, 완벽한 V5.3 진입 조건을 만족하는 종목이 없습니다. (관망 유지)")
+            st.warning("⏳ 현재 시장이 극도로 조용합니다. 어떤 관점에서도 포착된 종목이 없습니다.")
 
 if ticker:
     with tab_detail:
@@ -233,7 +221,6 @@ if ticker:
                 df_15m = stock.history(period="1mo", interval="15m", prepost=True)
                 
                 if not df.empty and not df_15m.empty:
-                    # 15m 지표 산출
                     df_15m['TR'] = np.maximum(df_15m['High'] - df_15m['Low'], np.maximum(abs(df_15m['High'] - df_15m['Close'].shift(1)), abs(df_15m['Low'] - df_15m['Close'].shift(1))))
                     df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
                     df_15m['recent_macro_low'] = df_15m['Low'].rolling(15).min()
@@ -249,14 +236,11 @@ if ticker:
                         columns={'ATR': 'macro_atr', 'recent_macro_low': 'macro_low', 'recent_macro_high': 'macro_high'})
                     df = pd.merge_asof(df, df_15m_features, left_index=True, right_index=True)
 
-                    # 1m 지표 산출
                     df['NY_Time'] = df.index.tz_convert('America/New_York') if df.index.tzinfo else df.index
                     df['Date_NY'] = df['NY_Time'].dt.date
                     df['Time_NY'] = df['NY_Time'].dt.time
                     
                     is_regular = (df['Time_NY'] >= pd.to_datetime('09:30').time()) & (df['Time_NY'] < pd.to_datetime('16:00').time())
-                    is_premarket = (df['Time_NY'] >= pd.to_datetime('04:00').time()) & (df['Time_NY'] < pd.to_datetime('09:30').time())
-
                     daily_data = df[is_regular].groupby('Date_NY').agg({'High': 'max', 'Low': 'min'}).shift(1)
                     df = df.merge(daily_data.rename(columns={'High': 'PDH', 'Low': 'PDL'}), left_on='Date_NY', right_index=True, how='left')
 
@@ -290,7 +274,6 @@ if ticker:
                     df['Liq_Sweep_Bull'] = (df['Low'] < recent_20_low_1m) & (df['Close'] > recent_20_low_1m)
                     df['Liq_Sweep_Bear'] = (df['High'] > recent_20_high_1m) & (df['Close'] < recent_20_high_1m)
 
-                    # 시그널 판정
                     current = df.iloc[-1]
                     c_price, c_vwap, m_chop = current['Close'], current['VWAP'], current['macro_CHOP']
                     ny_time = current['Time_NY']
@@ -306,7 +289,6 @@ if ticker:
                     
                     for alert in alerts: st.markdown(alert, unsafe_allow_html=True)
                     
-                    # 관망 시 진입가 0원 처리 로직 적용
                     capital = 1000.0
                     is_short_pos = "숏" in position
                     is_active_signal = position != "관망 ⏳" and not is_market_open_noise
@@ -328,7 +310,6 @@ if ticker:
                         target_2 = entry_point - (risk_per_share * 2.0) if is_short_pos else entry_point + (risk_per_share * 2.0)
                         shares_to_buy = min(int((capital * 0.02) / risk_per_share), int(capital / entry_point)) if risk_per_share > 0 else 0
 
-                        # 알림 전송
                         last_time_str = str(df.index[-1])
                         if ticker not in st.session_state.last_alert_time or st.session_state.last_alert_time.get(ticker) != last_time_str:
                             send_discord_alert(webhook_url, ticker, position, entry_point, target_1, target_2, stop_loss)
@@ -369,7 +350,7 @@ if ticker:
                     fig.update_layout(height=750, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='#0b0e14', plot_bgcolor='#131722', showlegend=False, xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"오류: {e}")
+                st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
 
     with tab_backtest:
         st.info("시뮬레이터 탭에서는 과거 데이터를 바탕으로 한 전략의 승률과 자산 변화 곡선을 제공합니다. 메인 로직과 동일하게 적용되어 구동됩니다.")
