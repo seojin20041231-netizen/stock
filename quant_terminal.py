@@ -26,7 +26,7 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
             {"name": "목표가 2 (TP2)", "value": f"${tp2:.2f}", "inline": True},
             {"name": "손절가 (SL)", "value": f"${sl:.2f}", "inline": False},
         ],
-        "footer": {"text": "Ultimate Quant Terminal V3.2"}
+        "footer": {"text": "Ultimate Quant Terminal V4 (MTF Engine)"}
     }
     try:
         requests.post(webhook_url, json={"embeds": [embed]})
@@ -36,7 +36,7 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
 # ==========================================
 # 1. 터미널 UI 및 환경 설정
 # ==========================================
-st.set_page_config(page_title="Ultimate Quant Terminal V3.2", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Ultimate Quant Terminal V4", layout="wide", initial_sidebar_state="expanded")
 
 if 'last_alert_time' not in st.session_state:
     st.session_state.last_alert_time = {}
@@ -58,7 +58,7 @@ st.markdown("""
 
 with st.sidebar:
     st.header("⚙️ 시스템 설정")
-    st.info("🔒 총 자산: **$1,000** 고정\n🤖 동적 손익비(R:R) 엔진 활성화\n🔄 Pandas 백테스팅 시뮬레이터 탑재")
+    st.info("🔒 총 자산: **$1,000** 고정\n🤖 다중 시간대(MTF) 리스크 엔진 적용 완료\n🔄 백테스팅 시뮬레이터 탑재")
     
     st.markdown("---")
     st.header("🔔 무료 메신저 알림 (옵션)")
@@ -74,15 +74,15 @@ with st.sidebar:
         time.sleep(60)
         st.rerun()
 
-st.title("👁️‍🗨️ 세력 추적 & 초정밀 단타 퀀트 시스템 (V3.2)")
-st.caption("시간대 필터 + Discord 알림 + 과거 5일 Pandas 백테스트 엔진 내장")
+st.title("👁️‍🗨️ 세력 추적 & 초정밀 단타 퀀트 시스템 (V4)")
+st.caption("진입은 1분봉 정밀 타점 + 손익절은 15분봉 구조적 지지/저항(MTF) 기반")
 
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
     ticker = st.text_input("티커 입력 (예: NVDA, TSLA, SPY)", value="TSLA").upper().strip()
 
 if ticker:
-    with st.spinner("데이터 분석 및 백테스팅 엔진 구동 중..."):
+    with st.spinner("다중 시간대 데이터 병합 및 프랙탈 구조 분석 중..."):
         try:
             stock = yf.Ticker(ticker)
             df = stock.history(period="5d", interval="1m", prepost=True)
@@ -93,7 +93,28 @@ if ticker:
                 st.stop()
 
             # ==========================================
-            # 2. 지표 연산 (백테스트를 위해 전체 벡터화)
+            # 2. 지표 연산 (15분 매크로 데이터)
+            # ==========================================
+            df_15m['EMA20'] = df_15m['Close'].ewm(span=20).mean()
+            df_15m['EMA50'] = df_15m['Close'].ewm(span=50).mean()
+            macro_trend = "상승 (Bullish) 🟢" if df_15m['EMA20'].iloc[-1] > df_15m['EMA50'].iloc[-1] else "하락 (Bearish) 🔴"
+            
+            # 15분봉 ATR (구조적 변동성)
+            df_15m['TR'] = np.maximum(df_15m['High'] - df_15m['Low'], np.maximum(abs(df_15m['High'] - df_15m['Close'].shift(1)), abs(df_15m['Low'] - df_15m['Close'].shift(1))))
+            df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
+            
+            # 15분봉 15개 (약 4시간 분량)의 구조적 고점/저점 추출
+            df_15m['recent_macro_low'] = df_15m['Low'].rolling(15).min().shift(1)
+            df_15m['recent_macro_high'] = df_15m['High'].rolling(15).max().shift(1)
+
+            # 15분봉 데이터를 1분봉 데이터(df)에 시간 기준으로 병합(Merge)하여 백테스팅/실시간 분석에 동시 사용
+            df_15m_features = df_15m[['ATR', 'recent_macro_low', 'recent_macro_high']].rename(
+                columns={'ATR': 'macro_atr', 'recent_macro_low': 'macro_low', 'recent_macro_high': 'macro_high'}
+            )
+            df = pd.merge_asof(df, df_15m_features, left_index=True, right_index=True)
+
+            # ==========================================
+            # 3. 지표 연산 (1분 정밀 데이터)
             # ==========================================
             df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
             df['ATR'] = df['TR'].rolling(window=14).mean()
@@ -123,38 +144,28 @@ if ticker:
             df['FVG_Bull'] = (df['Low'] > df['High'].shift(2)) & (df['Close'].shift(1) > df['Open'].shift(1))
             df['Whale_Spike'] = df['Volume'] > (df['Vol_SMA20'] * 3.5)
 
-            df_15m['EMA20'] = df_15m['Close'].ewm(span=20).mean()
-            df_15m['EMA50'] = df_15m['Close'].ewm(span=50).mean()
-            macro_trend = "상승 (Bullish) 🟢" if df_15m['EMA20'].iloc[-1] > df_15m['EMA50'].iloc[-1] else "하락 (Bearish) 🔴"
-            
             sum_tr = df['TR'].rolling(14).sum()
             max_h = df['High'].rolling(14).max()
             min_l = df['Low'].rolling(14).min()
             df['CHOP'] = 100 * np.log10(sum_tr / (max_h - min_l)) / np.log10(14)
             
-            # 구조적 매물대 벡터화 (백테스트용)
-            df['recent_15_low'] = df['Low'].rolling(15).min().shift(1)
-            df['recent_15_high'] = df['High'].rolling(15).max().shift(1)
-            recent_20_low = df['Low'].rolling(20).min().shift(1)
-            df['Liq_Sweep_Bull'] = (df['Low'] < recent_20_low) & (df['Close'] > recent_20_low)
-            
-            body = abs(df['Close'] - df['Open'])
-            upper_wick = df['High'] - df[['Close', 'Open']].max(axis=1)
-            lower_wick = df[['Close', 'Open']].min(axis=1) - df['Low']
-            df['Bull_Pin'] = (lower_wick > 2 * body) & (upper_wick < body)
-            df['Bull_Engulf'] = (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Open'] < df['Close'].shift(1)) & (df['Close'] > df['Open'].shift(1))
+            recent_20_low_1m = df['Low'].rolling(20).min().shift(1)
+            df['Liq_Sweep_Bull'] = (df['Low'] < recent_20_low_1m) & (df['Close'] > recent_20_low_1m)
 
             # 탭 구성
-            tab1, tab2 = st.tabs(["👁️‍🗨️ 실시간 터미널", "🔄 백테스팅 시뮬레이터 (과거 5일)"])
+            tab1, tab2 = st.tabs(["👁️‍🗨️ 실시간 터미널 (MTF)", "🔄 백테스팅 시뮬레이터 (과거 5일)"])
 
             with tab1:
                 # ==========================================
-                # 3. 실시간 터미널 화면
+                # 4. 실시간 터미널 화면
                 # ==========================================
                 current = df.iloc[-1]
                 prev = df.iloc[-2]
                 
-                c_price, c_vwap, c_atr, c_chop = current['Close'], current['VWAP'], current['ATR'], current['CHOP']
+                c_price, c_vwap, c_chop = current['Close'], current['VWAP'], current['CHOP']
+                macro_atr = current['macro_atr']
+                recent_macro_high = current['macro_high']
+                recent_macro_low = current['macro_low']
 
                 last_dt = df.index[-1]
                 ny_time = last_dt.tz_convert('America/New_York') if last_dt.tzinfo else last_dt
@@ -185,25 +196,27 @@ if ticker:
                 with m3: st.markdown(f'<div class="card"><div class="title-text">시장 노이즈 (CHOP)</div><div class="value-text {"neutral" if is_market_open_noise or c_chop > 61.8 else "up"}">{market_state}</div></div>', unsafe_allow_html=True)
                 with m4: st.markdown(f'<div class="card"><div class="title-text">단기 포지션 방향</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
 
+                # --- 핵심 변경점: MTF 기반 손익절 연산 ---
                 capital = 1000.0
                 is_short = "숏" in position
                 entry_point = poc_price if is_short and c_price < poc_price else (min(poc_price if c_price > poc_price else c_vwap, c_price) if not is_short else c_vwap)
                 
-                volatility_pct = (c_atr / c_price) * 100 if c_price > 0 else 1.0
-                atr_multiplier = 2.0 if volatility_pct > 1.2 else 1.5
-
+                # 15분봉(매크로) ATR 및 고점/저점을 활용
                 if is_short:
-                    stop_loss = max(current['recent_15_high'], entry_point + (c_atr * atr_multiplier))
+                    atr_sl = entry_point + (macro_atr * 1.5)
+                    stop_loss = max(recent_macro_high, atr_sl) if pd.notna(recent_macro_high) else atr_sl
                 else:
-                    stop_loss = min(current['recent_15_low'], entry_point - (c_atr * atr_multiplier))
+                    atr_sl = entry_point - (macro_atr * 1.5)
+                    stop_loss = min(recent_macro_low, atr_sl) if pd.notna(recent_macro_low) else atr_sl
 
                 risk_per_share = abs(entry_point - stop_loss)
                 sl_pct = (risk_per_share / entry_point) * 100 if entry_point > 0 else 0.0
 
-                auto_risk_pct = 1.5
+                auto_risk_pct = 2.0  # 더 유의미한 매물대이므로 리스크를 조금 넓게 허용
                 rr_tp1, rr_tp2 = 1.2, 2.0
-                trade_mode = "⚡ 반등/조정 단타 (스캘핑 모드)"
-                mode_color = "#ff9800" if is_short else "#03a9f4"
+                
+                trade_mode = "⚡ 구조적 숏 스윙 (MTF 적용)" if is_short else "🔥 구조적 롱 스윙 (MTF 적용)"
+                mode_color = "#e91e63" if is_short else "#9c27b0"
 
                 target_1 = entry_point - (risk_per_share * rr_tp1) if is_short else entry_point + (risk_per_share * rr_tp1)
                 target_2 = entry_point - (risk_per_share * rr_tp2) if is_short else entry_point + (risk_per_share * rr_tp2)
@@ -222,16 +235,14 @@ if ticker:
                 st.markdown(f"""
                 <div class="ai-decision" style="border-left: 5px solid {mode_color};">
                     <h3 style="margin:0; color:{mode_color};">🤖 AI 동적 리스크 엔진: {trade_mode}</h3>
-                    <div style="background-color:rgba(255,255,255,0.05); padding:10px; margin-top:10px; border-radius:5px;">
-                        <b>🛡️ 포지션 관리 가이드:</b> 1차 익절 도달 시 50% 매도 후, 손절가를 <b>본절가(진입가)</b>로 즉시 상향하세요.
-                    </div>
+                    <p style="margin:5px 0 0 0; font-size: 14px;">1분봉 노이즈에 당하지 않도록 <b>15분봉(약 4시간 분량)의 구조적 매물대와 ATR</b>을 바탕으로 넓고 시원한 타겟을 산출했습니다.</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 c1, c2, c3 = st.columns(3)
                 with c1: st.markdown(f'<div class="card" style="border-top: 3px solid {"#ef5350" if is_short else "#26a69a"};"><h4 style="color:{"#ef5350" if is_short else "#26a69a"};">{position}</h4><h2 style="margin:0;">${entry_point:.2f}</h2><p style="margin-top:10px; font-size:14px; font-weight:bold;">💡 수량: {shares_to_buy} 주</p></div>', unsafe_allow_html=True)
-                with c2: st.markdown(f'<div class="card" style="border-top: 3px solid #42a5f5;"><h4 style="color:#42a5f5;">🔵 손익비(R:R) 익절</h4><p style="margin:0; font-size:16px;">1차 (1:{rr_tp1}): <b>${target_1:.2f}</b></p><p style="margin:5px 0 0 0; font-size:16px;">2차 (1:{rr_tp2}): <b>${target_2:.2f}</b></p></div>', unsafe_allow_html=True)
-                with c3: st.markdown(f'<div class="card" style="border-top: 3px solid #ff9800;"><h4 style="color:#ff9800;">⚠️ 유동적 손절</h4><h2 style="margin:0;">${stop_loss:.2f}</h2><p style="margin-top:10px; font-size:13px; color:#8a93a6;">리스크 1.5% 한도 내 차단</p></div>', unsafe_allow_html=True)
+                with c2: st.markdown(f'<div class="card" style="border-top: 3px solid #42a5f5;"><h4 style="color:#42a5f5;">🔵 손익비(R:R) 익절</h4><p style="margin:0; font-size:16px;">1차 (1:{rr_tp1} / +{target_1_pct:.1f}%): <b>${target_1:.2f}</b></p><p style="margin:5px 0 0 0; font-size:16px;">2차 (1:{rr_tp2} / +{target_2_pct:.1f}%): <b>${target_2:.2f}</b></p></div>', unsafe_allow_html=True)
+                with c3: st.markdown(f'<div class="card" style="border-top: 3px solid #ff9800;"><h4 style="color:#ff9800;">⚠️ MTF 구조적 손절</h4><h2 style="margin:0;">${stop_loss:.2f} <span style="font-size:15px; color:#ef5350;">(-{sl_pct:.2f}%)</span></h2><p style="margin-top:10px; font-size:13px; color:#8a93a6;">15m 지지/저항 라인 이탈 시 컷</p></div>', unsafe_allow_html=True)
 
                 st.markdown("### 📈 세력 추적 X-Ray 차트")
                 df_plot = df.tail(150)
@@ -247,82 +258,76 @@ if ticker:
 
             with tab2:
                 # ==========================================
-                # 4. 과거 5일 백테스팅 시뮬레이터 (Pandas 연산)
+                # 5. 과거 5일 백테스팅 시뮬레이터 (MTF 반영)
                 # ==========================================
                 st.markdown("### 🔄 과거 5일 전략 시뮬레이션 결과")
-                st.caption(f"자본금 $1,000 기준, 리스크 1.5% 및 TP1(R:R 1.2) 목표 백테스팅. 슬리피지 미포함. ({ticker})")
+                st.caption(f"자본금 $1,000 기준, 리스크 2.0% 및 구조적 TP1(R:R 1.2) 목표 백테스팅. ({ticker})")
                 
                 trades = []
                 in_trade = False
                 trade_type = ""
                 b_entry, b_tp, b_sl = 0, 0, 0
                 
-                # Pandas iterrows를 활용한 시뮬레이션
                 for idx, row in df.iterrows():
-                    if pd.isna(row['CHOP']) or pd.isna(row['ATR']): continue
+                    if pd.isna(row['CHOP']) or pd.isna(row['macro_atr']): continue
                     
                     if not in_trade:
-                        # 1. 시간 필터 (노이즈 구간 패스)
                         nt = idx.tz_convert('America/New_York') if idx.tzinfo else idx
                         if nt.hour == 9 and nt.minute < 45: continue
                         
-                        # 2. 진입 로직
                         is_long_sig = row['CHOP'] < 61.8 and row['MFI'] < 80 and (row['Close'] > row['VWAP'] or row['Liq_Sweep_Bull'])
                         is_short_sig = row['CHOP'] < 61.8 and row['MFI'] > 20 and row['Close'] < row['VWAP']
+                        
+                        m_atr = row['macro_atr']
                         
                         if is_long_sig:
                             in_trade = True
                             trade_type = "LONG"
                             b_entry = row['Close']
-                            b_sl = min(row['recent_15_low'], b_entry - row['ATR']*1.5) if pd.notna(row['recent_15_low']) else b_entry - row['ATR']*1.5
+                            b_sl = min(row['macro_low'], b_entry - (m_atr * 1.5)) if pd.notna(row['macro_low']) else b_entry - (m_atr * 1.5)
                             risk = abs(b_entry - b_sl)
-                            b_tp = b_entry + (risk * 1.2) # R:R 1.2
+                            b_tp = b_entry + (risk * 1.2)
                             entry_time = idx
                         elif is_short_sig:
                             in_trade = True
                             trade_type = "SHORT"
                             b_entry = row['Close']
-                            b_sl = max(row['recent_15_high'], b_entry + row['ATR']*1.5) if pd.notna(row['recent_15_high']) else b_entry + row['ATR']*1.5
+                            b_sl = max(row['macro_high'], b_entry + (m_atr * 1.5)) if pd.notna(row['macro_high']) else b_entry + (m_atr * 1.5)
                             risk = abs(b_entry - b_sl)
                             b_tp = b_entry - (risk * 1.2)
                             entry_time = idx
                     else:
-                        # 3. 청산 로직 (손절가 or 1차 목표가 터치 시)
                         if trade_type == "LONG":
                             if row['Low'] <= b_sl:
-                                trades.append({"Time": idx, "Type": "LONG", "Result": "LOSS", "Return(%)": -1.5}) # 리스크 1.5% 손실
+                                trades.append({"Time": idx, "Type": "LONG", "Result": "LOSS", "Return(%)": -2.0})
                                 in_trade = False
                             elif row['High'] >= b_tp:
-                                trades.append({"Time": idx, "Type": "LONG", "Result": "WIN", "Return(%)": 1.5 * 1.2}) # 1.8% 수익
+                                trades.append({"Time": idx, "Type": "LONG", "Result": "WIN", "Return(%)": 2.0 * 1.2})
                                 in_trade = False
                         elif trade_type == "SHORT":
                             if row['High'] >= b_sl:
-                                trades.append({"Time": idx, "Type": "SHORT", "Result": "LOSS", "Return(%)": -1.5})
+                                trades.append({"Time": idx, "Type": "SHORT", "Result": "LOSS", "Return(%)": -2.0})
                                 in_trade = False
                             elif row['Low'] <= b_tp:
-                                trades.append({"Time": idx, "Type": "SHORT", "Result": "WIN", "Return(%)": 1.5 * 1.2})
+                                trades.append({"Time": idx, "Type": "SHORT", "Result": "WIN", "Return(%)": 2.0 * 1.2})
                                 in_trade = False
 
-                # 백테스트 통계 계산
                 if len(trades) > 0:
                     df_trades = pd.DataFrame(trades)
                     wins = len(df_trades[df_trades['Result'] == 'WIN'])
                     losses = len(df_trades[df_trades['Result'] == 'LOSS'])
                     win_rate = (wins / len(trades)) * 100
                     
-                    # 자산 성장 곡선 계산 (단리 합산 기준)
                     df_trades['Equity'] = 1000 + (1000 * (df_trades['Return(%)'].cumsum() / 100))
                     final_equity = df_trades['Equity'].iloc[-1]
                     net_profit = ((final_equity - 1000) / 1000) * 100
 
-                    # 메트릭 표시
                     s1, s2, s3, s4 = st.columns(4)
                     s1.metric("총 거래 횟수", f"{len(trades)}회")
                     s2.metric("승률 (Win Rate)", f"{win_rate:.1f}%", f"{wins}승 {losses}패")
                     s3.metric("누적 수익률", f"{net_profit:.2f}%", "5일 기준")
                     s4.metric("최종 자산", f"${final_equity:.2f}")
 
-                    # Equity Curve 차트
                     fig_eq = go.Figure()
                     fig_eq.add_trace(go.Scatter(x=df_trades.index, y=df_trades['Equity'], mode='lines+markers', name='자산($)', line=dict(color='#26a69a', width=3)))
                     fig_eq.update_layout(title="📈 시뮬레이션 자산 성장 곡선", height=300, paper_bgcolor='#0b0e14', plot_bgcolor='#131722', font=dict(color='#8a93a6'))
@@ -337,3 +342,4 @@ if ticker:
 
         except Exception as e:
             st.error(f"시스템 오류 발생: {e}")
+
