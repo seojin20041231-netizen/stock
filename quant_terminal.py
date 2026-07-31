@@ -35,33 +35,49 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
         st.sidebar.error(f"알림 전송 실패: {e}")
 
 # ==========================================
-# 1. 자동 주도주 크롤링 (Top-Down Pre-filtering)
+# 1. 감시 종목 대폭 확장 (섹터별 핵심 주도주 60선 + 크롤링)
 # ==========================================
-@st.cache_data(ttl=600) # 10분마다 주도주 리스트 갱신
+@st.cache_data(ttl=600) # 10분마다 갱신
 def get_dynamic_market_leaders():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    # 고정 유니버스: 미장 변동성을 주도하는 핵심 종목들
+    mega_tech = ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META", "GOOGL"]
+    semiconductors = ["AMD", "SMCI", "AVGO", "MU", "INTC", "QCOM", "ARM", "ASML", "TSM"]
+    crypto_meme = ["MSTR", "COIN", "MARA", "RIOT", "GME", "AMC", "HOOD"]
+    ai_software = ["PLTR", "CRWD", "SNOW", "ADBE", "CRM", "DDOG", "NET", "PATH"]
+    ev_energy = ["RIVN", "LCID", "XPEV", "NIO", "ENPH", "FSLR"]
+    finance_others = ["JPM", "V", "MA", "PYPL", "SQ", "SOFI", "AFRM", "UPST", "CVNA", "DKNG", "UBER", "SHOP"]
+    
+    robust_universe = mega_tech + semiconductors + crypto_meme + ai_software + ev_energy + finance_others
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     url = 'https://finance.yahoo.com/most-active'
-    fallback_list = ["NVDA", "TSLA", "AAPL", "MSTR", "AMD", "COIN", "SMCI", "MARA", "PLTR", "ARM", "AMZN", "META"]
+    
     try:
         response = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(response.text, 'html.parser')
-        tickers = []
+        scraped_tickers = []
+        
         for a in soup.find_all('a', {'data-test': 'quoteLink'}):
             ticker = a.text.strip()
             if ticker.isalpha() and len(ticker) <= 5:
-                tickers.append(ticker)
-        unique_tickers = list(dict.fromkeys(tickers))[:40]
-        return unique_tickers if unique_tickers else fallback_list
-    except:
-        return fallback_list
+                scraped_tickers.append(ticker)
+                
+        # 크롤링된 당일 급등주를 우선 배치하고, 고정 유니버스를 이어 붙임 (중복 제거)
+        combined = scraped_tickers + robust_universe
+        unique_tickers = list(dict.fromkeys(combined))[:65] # yfinance 차단 방지 최대 65개
+        return unique_tickers
+        
+    except Exception:
+        # 크롤링 실패 시 든든한 백업 리스트 반환
+        return robust_universe[:65]
 
 # ==========================================
-# 2. 동적 시장 스캐너 (Sidebar)
+# 2. 동적 시장 스캐너 (Sidebar 용)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_v5_dynamic_screener(universe):
     results = []
-    # 빠른 사이드바 렌더링을 위해 상위 15개만 스캔
+    # 빠른 렌더링을 위해 상위 15개만 스캔
     for t in universe[:15]:
         try:
             stock = yf.Ticker(t)
@@ -84,7 +100,7 @@ def get_v5_dynamic_screener(universe):
     return df_res
 
 # ==========================================
-# 3. 다관점 3중 레이더 (Multi-Perspective)
+# 3. 다관점 3중 레이더 (조건 대폭 완화 + 감도 상승)
 # ==========================================
 @st.cache_data(ttl=60)
 def scan_multi_perspective_radar(universe):
@@ -108,34 +124,39 @@ def scan_multi_perspective_radar(universe):
             df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
             
             recent_20_low = df['Low'].rolling(20).min().shift(1)
+            recent_20_high = df['High'].rolling(20).max().shift(1)
             
             curr = df.iloc[-1]
             c_price = curr['Close']
             c_vwap = curr['VWAP']
             
-            # 관점 1: 거래량 폭발 (고래 개입)
-            if curr['Volume'] > (curr['Vol_SMA20'] * 3.5):
+            # 관점 1: 단기 수급 유입 (기준 완화: 2.0배 이상)
+            if curr['Volume'] > (curr['Vol_SMA20'] * 2.0):
                 dir_color = "상승 🟢" if curr['Close'] > curr['Open'] else "하락 🔴"
-                radar_results.append({"포착 관점": f"🐋 거래량 폭발 ({dir_color})", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"평균 대비 {(curr['Volume']/curr['Vol_SMA20']):.1f}배 거래량 유입"})
+                radar_results.append({"포착 관점": f"🐋 단기 수급 유입 ({dir_color})", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"평균 대비 {(curr['Volume']/curr['Vol_SMA20']):.1f}배 거래량 터짐"})
                 
-            # 관점 2: 눌림목 임박 (VWAP 근접)
+            # 관점 2: 눌림목/반등 대기 (기준 완화: VWAP 0.8% 이내)
             vwap_dist_pct = abs(c_price - c_vwap) / c_vwap * 100
-            if vwap_dist_pct <= 0.3:
+            if vwap_dist_pct <= 0.8:
                 cvd_status = "매수 우위" if curr['CVD'] > df.iloc[-2]['CVD'] else "매도 우위"
-                radar_results.append({"포착 관점": "⏳ VWAP 눌림목 임박", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"VWAP과 {vwap_dist_pct:.2f}% 근접 ({cvd_status})"})
+                radar_results.append({"포착 관점": "⏳ VWAP 눌림/반등 대기", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"VWAP과 {vwap_dist_pct:.2f}% 차이 ({cvd_status})"})
                 
-            # 관점 3: V5 정밀 타점
+            # 관점 3: V5 정밀 타점 (조건 일치시)
             liq_sweep = (curr['Low'] < recent_20_low) and (c_price > recent_20_low)
             cvd_rising = curr['CVD'] > df['CVD'].rolling(10).min().iloc[-2]
-            
             if liq_sweep and cvd_rising and (c_price > c_vwap):
                 radar_results.append({"포착 관점": "🚨 V5 정밀 롱 타점", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매물대 스위핑 및 CVD 동의"})
+                
+            # 관점 4: 단기 모멘텀 (고점 돌파)
+            if (c_price > recent_20_high) and (curr['Volume_Delta'] > 0):
+                radar_results.append({"포착 관점": "📈 단기 고점 돌파 (모멘텀)", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매수세 유입 동반 단기 고점 돌파"})
                 
         except: continue
             
     df_radar = pd.DataFrame(radar_results)
     if not df_radar.empty:
-        df_radar['Rank'] = df_radar['포착 관점'].map(lambda x: 1 if "🚨" in x else (2 if "🐋" in x else 3))
+        # 우선순위 부여 (정밀 -> 돌파 -> 수급 -> 눌림목)
+        df_radar['Rank'] = df_radar['포착 관점'].map(lambda x: 1 if "🚨" in x else (2 if "📈" in x else (3 if "🐋" in x else 4)))
         df_radar = df_radar.sort_values(by=['Rank', '티커']).drop(columns=['Rank']).reset_index(drop=True)
     return df_radar
 
@@ -165,7 +186,7 @@ live_universe = get_dynamic_market_leaders()
 
 with st.sidebar:
     st.header("⚙️ V5.4 마스터 설정")
-    st.info("🔒 총 자산: **$1,000**\n🚀 AI 주도주 크롤링 탑재\n📊 다관점 3중 레이더망 가동")
+    st.info(f"🔒 총 자산: **$1,000**\n🚀 AI 주도주 크롤링 탑재 (현재 감시: {len(live_universe)}개)\n📊 다관점 4중 레이더망 가동 (조건 완화)")
     
     st.markdown("---")
     st.header("🔥 오늘 시장의 주도주 Top 5")
@@ -197,20 +218,20 @@ with col1:
     ticker = st.text_input("상세 분석 티커 입력 (예: NVDA)", value=default_ticker).upper().strip()
 
 # 탭 구성
-tab_radar, tab_detail, tab_backtest = st.tabs(["🎯 실시간 3중 레이더망", "👁️‍🗨️ 종목별 세부 X-Ray", "🔄 백테스팅 시뮬레이터"])
+tab_radar, tab_detail, tab_backtest = st.tabs(["🎯 실시간 4중 레이더망", "👁️‍🗨️ 종목별 세부 X-Ray", "🔄 백테스팅 시뮬레이터"])
 
 with tab_radar:
-    st.markdown("### ⚡ 다관점 3중 레이더 (Multi-Perspective)")
-    st.caption(f"오늘 시장에서 가장 활발하게 거래되는 상위 {len(live_universe)}개 종목을 크롤링하여 거래량 폭발, 눌림목 대기, 정밀 타점 3가지 관점으로 실시간 감시합니다.")
+    st.markdown("### ⚡ 다관점 4중 레이더 (Multi-Perspective)")
+    st.caption(f"안정적인 감시를 위해 총 **{len(live_universe)}개**의 주도주 및 급등주를 4가지 관점(거래량, 눌림목, 돌파, 정밀 타점)으로 실시간 스캔합니다.")
     
-    with st.spinner("3중 레이더망으로 전 시장 감시 중..."):
+    with st.spinner("레이더망으로 전 시장 감시 중..."):
         df_radar = scan_multi_perspective_radar(live_universe)
         if not df_radar.empty:
             st.success(f"🔥 총 **{len(df_radar)}건**의 특이 동향이 포착되었습니다!")
             st.dataframe(df_radar, use_container_width=True, hide_index=True)
             st.info("💡 위 표에서 관심 가는 '티커'를 상단 검색창에 입력해 세부 차트와 타점을 확인하세요.")
         else:
-            st.warning("⏳ 현재 시장이 극도로 조용합니다. 어떤 관점에서도 포착된 종목이 없습니다.")
+            st.warning("⏳ 현재 포착된 종목이 없습니다. 잠시 후 새로고침 해보세요.")
 
 if ticker:
     with tab_detail:
@@ -282,7 +303,7 @@ if ticker:
                     position = "관망 ⏳"
                     alerts = []
                     if is_market_open_noise: alerts.append('<div class="alert-box alert-info">🛑 <b>시간대 필터:</b> 개장 직후 15분은 휩소 구간으로 진입이 금지됩니다.</div>')
-                    elif m_chop > 61.8: alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다.</div>')
+                    elif m_chop > 61.8: alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다. 박스권 매매를 권장합니다.</div>')
                     else:
                         if (current['Sweep_PDL'] or current['CVD_Bull_Div'] or (current['Liq_Sweep_Bull'] and current['MFI'] < 40)) and (c_price > c_vwap) and (current['Volume_Delta'] > 0): position = "롱(매수) 진입 🟢"
                         elif (current['Sweep_PDH'] or current['CVD_Bear_Div'] or (current['Liq_Sweep_Bear'] and current['MFI'] > 60)) and (c_price < c_vwap) and (current['Volume_Delta'] < 0): position = "숏(매도) 진입 🔴"
