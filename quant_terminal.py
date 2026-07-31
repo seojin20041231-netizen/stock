@@ -39,7 +39,6 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
 # ==========================================
 @st.cache_data(ttl=600) # 10분마다 갱신
 def get_dynamic_market_leaders():
-    # 고정 유니버스: 미장 변동성을 주도하는 핵심 종목들
     mega_tech = ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META", "GOOGL"]
     semiconductors = ["AMD", "SMCI", "AVGO", "MU", "INTC", "QCOM", "ARM", "ASML", "TSM"]
     crypto_meme = ["MSTR", "COIN", "MARA", "RIOT", "GME", "AMC", "HOOD"]
@@ -62,13 +61,11 @@ def get_dynamic_market_leaders():
             if ticker.isalpha() and len(ticker) <= 5:
                 scraped_tickers.append(ticker)
                 
-        # 크롤링된 당일 급등주를 우선 배치하고, 고정 유니버스를 이어 붙임 (중복 제거)
         combined = scraped_tickers + robust_universe
         unique_tickers = list(dict.fromkeys(combined))[:65] # yfinance 차단 방지 최대 65개
         return unique_tickers
         
     except Exception:
-        # 크롤링 실패 시 든든한 백업 리스트 반환
         return robust_universe[:65]
 
 # ==========================================
@@ -77,7 +74,6 @@ def get_dynamic_market_leaders():
 @st.cache_data(ttl=300)
 def get_v5_dynamic_screener(universe):
     results = []
-    # 빠른 렌더링을 위해 상위 15개만 스캔
     for t in universe[:15]:
         try:
             stock = yf.Ticker(t)
@@ -130,24 +126,20 @@ def scan_multi_perspective_radar(universe):
             c_price = curr['Close']
             c_vwap = curr['VWAP']
             
-            # 관점 1: 단기 수급 유입 (기준 완화: 2.0배 이상)
             if curr['Volume'] > (curr['Vol_SMA20'] * 2.0):
                 dir_color = "상승 🟢" if curr['Close'] > curr['Open'] else "하락 🔴"
                 radar_results.append({"포착 관점": f"🐋 단기 수급 유입 ({dir_color})", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"평균 대비 {(curr['Volume']/curr['Vol_SMA20']):.1f}배 거래량 터짐"})
                 
-            # 관점 2: 눌림목/반등 대기 (기준 완화: VWAP 0.8% 이내)
             vwap_dist_pct = abs(c_price - c_vwap) / c_vwap * 100
             if vwap_dist_pct <= 0.8:
                 cvd_status = "매수 우위" if curr['CVD'] > df.iloc[-2]['CVD'] else "매도 우위"
                 radar_results.append({"포착 관점": "⏳ VWAP 눌림/반등 대기", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": f"VWAP과 {vwap_dist_pct:.2f}% 차이 ({cvd_status})"})
                 
-            # 관점 3: V5 정밀 타점 (조건 일치시)
             liq_sweep = (curr['Low'] < recent_20_low) and (c_price > recent_20_low)
             cvd_rising = curr['CVD'] > df['CVD'].rolling(10).min().iloc[-2]
             if liq_sweep and cvd_rising and (c_price > c_vwap):
                 radar_results.append({"포착 관점": "🚨 V5 정밀 롱 타점", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매물대 스위핑 및 CVD 동의"})
                 
-            # 관점 4: 단기 모멘텀 (고점 돌파)
             if (c_price > recent_20_high) and (curr['Volume_Delta'] > 0):
                 radar_results.append({"포착 관점": "📈 단기 고점 돌파 (모멘텀)", "티커": t, "현재가": f"${c_price:.2f}", "특이사항": "매수세 유입 동반 단기 고점 돌파"})
                 
@@ -155,7 +147,6 @@ def scan_multi_perspective_radar(universe):
             
     df_radar = pd.DataFrame(radar_results)
     if not df_radar.empty:
-        # 우선순위 부여 (정밀 -> 돌파 -> 수급 -> 눌림목)
         df_radar['Rank'] = df_radar['포착 관점'].map(lambda x: 1 if "🚨" in x else (2 if "📈" in x else (3 if "🐋" in x else 4)))
         df_radar = df_radar.sort_values(by=['Rank', '티커']).drop(columns=['Rank']).reset_index(drop=True)
     return df_radar
@@ -181,7 +172,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 전역 주도주 유니버스 호출
 live_universe = get_dynamic_market_leaders()
 
 with st.sidebar:
@@ -217,7 +207,6 @@ with col1:
     default_ticker = df_hot.iloc[0]['티커'] if not df_hot.empty else "TSLA"
     ticker = st.text_input("상세 분석 티커 입력 (예: NVDA)", value=default_ticker).upper().strip()
 
-# 탭 구성
 tab_radar, tab_detail, tab_backtest = st.tabs(["🎯 실시간 4중 레이더망", "👁️‍🗨️ 종목별 세부 X-Ray", "🔄 백테스팅 시뮬레이터"])
 
 with tab_radar:
@@ -242,6 +231,7 @@ if ticker:
                 df_15m = stock.history(period="1mo", interval="15m", prepost=True)
                 
                 if not df.empty and not df_15m.empty:
+                    # 보조지표 계산
                     df_15m['TR'] = np.maximum(df_15m['High'] - df_15m['Low'], np.maximum(abs(df_15m['High'] - df_15m['Close'].shift(1)), abs(df_15m['Low'] - df_15m['Close'].shift(1))))
                     df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
                     df_15m['recent_macro_low'] = df_15m['Low'].rolling(15).min()
@@ -300,16 +290,46 @@ if ticker:
                     ny_time = current['Time_NY']
                     is_market_open_noise = ny_time >= pd.to_datetime('09:30').time() and ny_time < pd.to_datetime('09:45').time()
 
+                    # ==========================================
+                    # 🔥 [개선된 신호 감지 로직]
+                    # ==========================================
+                    # 1. 최근 3개 봉(3분) 이내 조건 발생 여부 (유연성 확보)
+                    recent_pdl_sweep = df['Sweep_PDL'].tail(3).any()
+                    recent_pdh_sweep = df['Sweep_PDH'].tail(3).any()
+                    recent_bull_div = df['CVD_Bull_Div'].tail(3).any()
+                    recent_bear_div = df['CVD_Bear_Div'].tail(3).any()
+                    recent_liq_bull = (df['Liq_Sweep_Bull'] & (df['MFI'] < 50)).tail(3).any()
+                    recent_liq_bear = (df['Liq_Sweep_Bear'] & (df['MFI'] > 50)).tail(3).any()
+
+                    # 2. 스캐너 포착 급등주를 위한 [모멘텀/돌파 조건] 추가
+                    vol_sma10 = df['Volume'].rolling(10).mean().iloc[-1]
+                    is_breakout_long = (c_price > recent_20_high_1m.iloc[-1]) and (c_price > c_vwap) and (current['Volume'] > vol_sma10 * 1.3)
+                    is_breakout_short = (c_price < recent_20_low_1m.iloc[-1]) and (c_price < c_vwap) and (current['Volume'] > vol_sma10 * 1.3)
+
                     position = "관망 ⏳"
                     alerts = []
-                    if is_market_open_noise: alerts.append('<div class="alert-box alert-info">🛑 <b>시간대 필터:</b> 개장 직후 15분은 휩소 구간으로 진입이 금지됩니다.</div>')
-                    elif m_chop > 61.8: alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다. 박스권 매매를 권장합니다.</div>')
+
+                    if is_market_open_noise:
+                        alerts.append('<div class="alert-box alert-info">🛑 <b>시간대 필터:</b> 개장 직후 15분은 휩소 구간으로 진입이 금지됩니다.</div>')
                     else:
-                        if (current['Sweep_PDL'] or current['CVD_Bull_Div'] or (current['Liq_Sweep_Bull'] and current['MFI'] < 40)) and (c_price > c_vwap) and (current['Volume_Delta'] > 0): position = "롱(매수) 진입 🟢"
-                        elif (current['Sweep_PDH'] or current['CVD_Bear_Div'] or (current['Liq_Sweep_Bear'] and current['MFI'] > 60)) and (c_price < c_vwap) and (current['Volume_Delta'] < 0): position = "숏(매도) 진입 🔴"
+                        if m_chop > 61.8:
+                            alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다. 짧은 익절을 권장합니다.</div>')
+
+                        # 롱(매수) 진입 조건: 눌림목 반등 OR 모멘텀 돌파
+                        if (recent_pdl_sweep or recent_bull_div or recent_liq_bull) and (c_price > c_vwap):
+                            position = "🎯 눌림 롱 진입 🟢"
+                        elif is_breakout_long:
+                            position = "🚀 돌파 롱 진입 🟢"
+                        
+                        # 숏(매도) 진입 조건: 저항 반락 OR 하락 돌파
+                        elif (recent_pdh_sweep or recent_bear_div or recent_liq_bear) and (c_price < c_vwap):
+                            position = "🎯 눌림 숏 진입 🔴"
+                        elif is_breakout_short:
+                            position = "🚀 돌파 숏 진입 🔴"
                     
                     for alert in alerts: st.markdown(alert, unsafe_allow_html=True)
                     
+                    # 포지션 계산 및 웹훅 연동
                     capital = 1000.0
                     is_short_pos = "숏" in position
                     is_active_signal = position != "관망 ⏳" and not is_market_open_noise
@@ -336,6 +356,7 @@ if ticker:
                             send_discord_alert(webhook_url, ticker, position, entry_point, target_1, target_2, stop_loss)
                             st.session_state.last_alert_time[ticker] = last_time_str
                     
+                    # UI 렌더링
                     st.markdown("### 📊 실시간 CVD & 시장 구조")
                     m1, m2, m3, m4 = st.columns(4)
                     with m1: st.markdown(f'<div class="card"><div class="title-text">현재가</div><div class="value-text {"up" if c_price >= df.iloc[-2]["Close"] else "down"}">${c_price:.2f}</div></div>', unsafe_allow_html=True)
