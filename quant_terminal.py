@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 터미널 UI 및 환경 설정
 # ==========================================
-st.set_page_config(page_title="Ultimate Quant Terminal V2.5", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Ultimate Quant Terminal V3", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
     <style>
@@ -25,17 +25,17 @@ st.markdown("""
     .alert-danger { background-color: rgba(239, 83, 80, 0.1); border-left: 4px solid #ef5350; color: #ef5350; }
     .alert-success { background-color: rgba(38, 166, 154, 0.1); border-left: 4px solid #26a69a; color: #26a69a; }
     .alert-warning { background-color: rgba(245, 203, 92, 0.1); border-left: 4px solid #f5cb5c; color: #f5cb5c; }
+    .ai-decision { background-color: rgba(156, 39, 176, 0.1); border: 1px solid #9c27b0; padding: 15px; border-radius: 8px; margin-bottom: 20px;}
     hr { border-color: #2a2e39; margin: 20px 0; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# [신규] 사이드바: 트레이딩 설정 및 리스크 관리
+# 2. 사이드바: 고정 자산 및 자동 새로고침 설정
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ 트레이딩 설정")
-    capital = st.number_input("총 자산 (Capital $)", min_value=100, value=10000, step=1000)
-    risk_pct = st.slider("1회 최대 감수 리스크 (%)", 1.0, 5.0, 2.0, 0.5)
+    st.header("⚙️ 시스템 설정")
+    st.info("🔒 총 자산은 **$1,000**로 고정되어 있습니다.\n\n🤖 AI가 시장 상황을 분석하여 1회 리스크(%)와 목표 수익률(3% 단타 vs 10% 스윙)을 스스로 결정합니다.")
     
     st.markdown("---")
     st.header("🔄 데이터 갱신")
@@ -47,12 +47,9 @@ with st.sidebar:
         time.sleep(60)
         st.rerun()
 
-st.title("👁️‍🗨️ 세력 추적 & 초정밀 단타 퀀트 시스템 (V2.5)")
-st.caption("기존 로직 + 버그 픽스 + 리스크 관리(포지션 사이징) 및 차트 시각화 강화")
+st.title("👁️‍🗨️ 세력 추적 & 초정밀 단타 퀀트 시스템 (V3)")
+st.caption("AI 자동 리스크 판별 탑재 (스캘핑 vs 하이리스크 하이리턴 자동 스위칭)")
 
-# ==========================================
-# 2. 데이터 수집
-# ==========================================
 col1, col2, col3 = st.columns([1, 2, 2])
 with col1:
     ticker = st.text_input("티커 입력 (예: NVDA, TSLA, SPY)", value="TSLA").upper().strip()
@@ -69,7 +66,7 @@ if ticker:
                 st.stop()
 
             # ==========================================
-            # 3. 기본 지표 연산
+            # 3. 지표 연산 (ATR, VWAP, OBV, MFI, CHOP, 패턴)
             # ==========================================
             df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1))))
             df['ATR'] = df['TR'].rolling(window=14).mean()
@@ -97,9 +94,6 @@ if ticker:
             df['FVG_Bull'] = (df['Low'] > df['High'].shift(2)) & (df['Close'].shift(1) > df['Open'].shift(1))
             df['Whale_Spike'] = df['Volume'] > (df['Vol_SMA20'] * 3.5)
 
-            # ==========================================
-            # 4. 단타의 신 로직 (MTF, CHOP, Sweep)
-            # ==========================================
             df_15m['EMA20'] = df_15m['Close'].ewm(span=20).mean()
             df_15m['EMA50'] = df_15m['Close'].ewm(span=50).mean()
             macro_trend = "상승 (Bullish) 🟢" if df_15m['EMA20'].iloc[-1] > df_15m['EMA50'].iloc[-1] else "하락 (Bearish) 🔴"
@@ -120,7 +114,7 @@ if ticker:
             df['Liq_Sweep_Bull'] = (df['Low'] < recent_20_low) & (df['Close'] > recent_20_low)
 
             # ==========================================
-            # 5. 실시간 상황 및 판독기
+            # 4. 포지션 판독 및 실시간 알림
             # ==========================================
             current = df.iloc[-1]
             prev = df.iloc[-2]
@@ -134,28 +128,19 @@ if ticker:
             market_state = "추세 진행 중 📈"
             if c_chop > 61.8:
                 market_state = "박스권 횡보 중 (휩소 주의) ⏳"
-                alerts.append('<div class="alert-box alert-warning">⚠️ <b>노이즈 경고:</b> CHOP 지수가 높습니다. 세력이 방향을 정하지 않은 횡보장이니 진입을 보류하세요.</div>')
-
-            near_support = abs(c_price - c_vwap) < c_atr or abs(c_price - poc_price) < c_atr
-            if current['Liq_Sweep_Bull']:
-                alerts.append('<div class="alert-box alert-success">🔥 <b>유동성 사냥 포착:</b> 개미들의 손절 물량을 뺏고 말아올리는 세력의 Stop-Hunt(휩소) 패턴이 발생했습니다!</div>')
-            if (current['Bull_Pin'] or current['Bull_Engulf']) and near_support:
-                alerts.append('<div class="alert-box alert-success">🎯 <b>핵심 캔들 출현:</b> 주포 평단가(VWAP/POC) 부근에서 강력한 지지 캔들(핀바/장악형)이 포착되었습니다.</div>')
+                alerts.append('<div class="alert-box alert-warning">⚠️ <b>노이즈 경고:</b> CHOP 지수가 높습니다. 세력이 방향을 정하지 않은 횡보장이니 보수적으로 접근하세요.</div>')
 
             position = "관망 ⏳"
             if c_chop < 61.8 and current['MFI'] < 80 and (c_price > c_vwap or current['Liq_Sweep_Bull']):
-                if "하락" in macro_trend:
-                    position = "단기 반등 (역추세 단타) 🟡"
-                else:
-                    position = "강력한 롱(매수) 진입 🟢"
+                position = "롱(매수) 진입 🟢"
             elif c_chop < 61.8 and current['MFI'] > 20 and c_price < c_vwap:
                 position = "숏(매도) 진입 🔴"
 
-            # UI 대시보드 출력
+            # UI 출력
             for alert in alerts:
                 st.markdown(alert, unsafe_allow_html=True)
             
-            st.markdown("### 📊 V2 엔진: 실시간 시장 구조 분석")
+            st.markdown("### 📊 실시간 시장 구조 분석")
             m1, m2, m3, m4 = st.columns(4)
             with m1:
                 st.markdown(f'<div class="card"><div class="title-text">현재가</div><div class="value-text {"up" if c_price >= prev["Close"] else "down"}">${c_price:.2f}</div></div>', unsafe_allow_html=True)
@@ -164,36 +149,84 @@ if ticker:
             with m3:
                 st.markdown(f'<div class="card"><div class="title-text">시장 노이즈 (CHOP)</div><div class="value-text {"neutral" if c_chop > 61.8 else "up"}">{market_state}</div></div>', unsafe_allow_html=True)
             with m4:
-                st.markdown(f'<div class="card"><div class="title-text">AI 시스템 최종 판독</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="card"><div class="title-text">단기 포지션 방향</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
 
             # ==========================================
-            # 6. [신규/버그픽스] 실전 퀀트 매매 전략 시트 (포지션 분리 및 수량 계산)
+            # 5. [핵심] AI 자동 리스크 판별 로직 (V3)
             # ==========================================
-            st.markdown("### 🎯 동적 타점 & 리스크 관리 시나리오")
-            
+            capital = 1000.0  # 자산 1000달러 고정
             recent_15_low = df['Low'].tail(15).min()
             recent_15_high = df['High'].tail(15).max()
             
+            is_macro_bull = "상승" in macro_trend
+            is_strong_pattern = current['Liq_Sweep_Bull'] or current['Bull_Pin'] or current['Bull_Engulf']
             is_short = "숏" in position
             
+            # AI 시나리오 변수 초기화
+            trade_mode = ""
+            auto_risk_pct = 0.0
+            target_1_pct = 0.0
+            target_2_pct = 0.0
+            mode_color = ""
+
             if is_short:
-                # 숏(매도) 포지션
-                entry_point = poc_price if c_price < poc_price else c_vwap
-                target_1 = entry_point - (c_atr * 1.5)
-                target_2 = entry_point - (c_atr * 3.0)
-                stop_loss = max(entry_point + (c_atr * 1.2), recent_15_high) # 진입가보다 높게
+                # 숏(매도)일 때의 로직
+                if not is_macro_bull and current['MFI'] > 70 and c_price < c_vwap:
+                    trade_mode = "🔥 완벽한 하방 추세 (High Risk / 10% 스윙)"
+                    auto_risk_pct = 5.0    # 5% 리스크 감수
+                    target_1_pct = 0.05    # 5% 하락 목표
+                    target_2_pct = 0.10    # 10% 하락 목표
+                    mode_color = "#e91e63"
+                else:
+                    trade_mode = "⚡ 짧은 조정 단타 (Low Risk / 3% 스캘핑)"
+                    auto_risk_pct = 1.5    # 1.5% 리스크로 방어
+                    target_1_pct = 0.015   # 1.5% 하락 목표
+                    target_2_pct = 0.03    # 3% 하락 목표
+                    mode_color = "#ff9800"
             else:
-                # 롱(매수) 또는 관망 포지션
+                # 롱(매수)일 때의 로직
+                if is_macro_bull and is_strong_pattern and c_price > c_vwap:
+                    trade_mode = "🔥 확실한 추세 전환 (High Risk / 10% 스윙)"
+                    auto_risk_pct = 5.0    # 5% 리스크 감수 ($50 손절)
+                    target_1_pct = 0.05    # 5% 수익 목표
+                    target_2_pct = 0.10    # 10% 이상 수익 목표
+                    mode_color = "#9c27b0"
+                else:
+                    trade_mode = "⚡ 짧게 먹고 나오는 반등 단타 (Low Risk / 3% 스캘핑)"
+                    auto_risk_pct = 1.5    # 1.5% 리스크 감수 ($15 손절)
+                    target_1_pct = 0.015   # 1.5% 수익 목표
+                    target_2_pct = 0.03    # 3% 수익 목표
+                    mode_color = "#03a9f4"
+
+            # 진입가, 익절가, 손절가 계산 (롱/숏 방향에 맞춰 퍼센트 증감)
+            if is_short:
+                entry_point = poc_price if c_price < poc_price else c_vwap
+                target_1 = entry_point * (1 - target_1_pct)
+                target_2 = entry_point * (1 - target_2_pct)
+                # 손절가는 ATR 기반과 최근 고점 중 더 높은(안전한) 가격
+                stop_loss = max(entry_point + (c_atr * 1.5), recent_15_high)
+            else:
                 base_entry = poc_price if c_price > poc_price else c_vwap
                 entry_point = min(base_entry, c_price)
-                target_1 = entry_point + (c_atr * 1.5)
-                target_2 = entry_point + (c_atr * 3.0)
-                stop_loss = min(entry_point - (c_atr * 1.2), recent_15_low) # 진입가보다 낮게
+                target_1 = entry_point * (1 + target_1_pct)
+                target_2 = entry_point * (1 + target_2_pct)
+                # 손절가는 ATR 기반과 최근 저점 중 더 낮은(안전한) 가격
+                stop_loss = min(entry_point - (c_atr * 1.5), recent_15_low)
                 
-            # [신규] 리스크 기반 포지션 사이징 계산
-            risk_amount = capital * (risk_pct / 100)
+            # 리스크 기반 포지션 사이징 계산
+            risk_amount = capital * (auto_risk_pct / 100.0)
             price_diff = abs(entry_point - stop_loss)
             shares_to_buy = int(risk_amount / price_diff) if price_diff > 0 else 0
+
+            # ==========================================
+            # 6. UI: AI 전략 및 매매 시나리오 시트
+            # ==========================================
+            st.markdown(f"""
+            <div class="ai-decision" style="border-left: 5px solid {mode_color};">
+                <h3 style="margin:0; color:{mode_color};">🤖 AI 판단: {trade_mode}</h3>
+                <p style="margin:5px 0 0 0; font-size: 15px;">프로그램이 감당할 최대 리스크를 <b>{auto_risk_pct}% (약 ${risk_amount:.0f})</b>로 자동 설정했습니다.</p>
+            </div>
+            """, unsafe_allow_html=True)
             
             theme_color = "#ef5350" if is_short else "#26a69a"
             position_text = "🔴 숏(매도) 진입" if is_short else "🟢 롱(매수) 진입"
@@ -204,15 +237,15 @@ if ticker:
                 <div class="card" style="border-top: 3px solid {theme_color};">
                     <h4 style="color:{theme_color};">{position_text}</h4>
                     <h2 style="margin:0;">${entry_point:.2f}</h2>
-                    <p style="margin-top:10px; font-size:14px; font-weight:bold; color:#e0e0e0;">💡 권장 진입 수량: {shares_to_buy} 주</p>
+                    <p style="margin-top:10px; font-size:14px; font-weight:bold; color:#e0e0e0;">💡 권장 매수 수량: {shares_to_buy} 주</p>
                 </div>
                 """, unsafe_allow_html=True)
             with c2:
                 st.markdown(f"""
                 <div class="card" style="border-top: 3px solid #42a5f5;">
                     <h4 style="color:#42a5f5;">🔵 파동 익절 (Target)</h4>
-                    <p style="margin:0; font-size:18px;">1차: <b>${target_1:.2f}</b></p>
-                    <p style="margin:5px 0 0 0; font-size:18px;">2차: <b>${target_2:.2f}</b></p>
+                    <p style="margin:0; font-size:18px;">1차 ({target_1_pct*100}%): <b>${target_1:.2f}</b></p>
+                    <p style="margin:5px 0 0 0; font-size:18px;">2차 ({target_2_pct*100}%): <b>${target_2:.2f}</b></p>
                 </div>
                 """, unsafe_allow_html=True)
             with c3:
@@ -220,14 +253,14 @@ if ticker:
                 <div class="card" style="border-top: 3px solid #ff9800;">
                     <h4 style="color:#ff9800;">⚠️ 구조적 손절 (Stop Loss)</h4>
                     <h2 style="margin:0;">${stop_loss:.2f}</h2>
-                    <p style="margin-top:10px; font-size:13px; color:#8a93a6;">최대 손실액: ${risk_amount:.0f}</p>
+                    <p style="margin-top:10px; font-size:13px; color:#8a93a6;">리스크 한도 초과 시 즉시 손절</p>
                 </div>
                 """, unsafe_allow_html=True)
 
             # ==========================================
-            # 7. 인터랙티브 통합 차트 (Plotly 시각화 강화)
+            # 7. 인터랙티브 통합 차트 (Plotly)
             # ==========================================
-            st.markdown("### 📈 세력 추적 X-Ray 차트 (최근 150분)")
+            st.markdown("### 📈 세력 추적 X-Ray 차트")
             df_plot = df.tail(150)
             
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
@@ -237,13 +270,11 @@ if ticker:
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VWAP'], line=dict(color='#ffeb3b', width=2), name='VWAP (당일평균)'), row=1, col=1)
             fig.add_hline(y=poc_price, line_dash="dot", line_color="#b39ddb", annotation_text="POC (최대 매물대)", row=1, col=1)
             
-            # [신규] 유동성 사냥(Sweep) 마커 표시
             sweep_points = df_plot[df_plot['Liq_Sweep_Bull']]
             fig.add_trace(go.Scatter(x=sweep_points.index, y=sweep_points['Low'], mode='markers',
                                      marker=dict(symbol='triangle-up', size=12, color='#ff9800'),
                                      name='유동성 사냥(Sweep)'), row=1, col=1)
             
-            # [신규] FVG(공정가치갭) 마커 표시
             fvg_points = df_plot[df_plot['FVG_Bull']]
             fig.add_trace(go.Scatter(x=fvg_points.index, y=fvg_points['Low'], mode='markers+text',
                                      marker=dict(symbol='star', size=10, color='#26a69a'),
