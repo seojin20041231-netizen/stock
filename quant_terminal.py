@@ -36,6 +36,84 @@ def send_discord_alert(webhook_url, ticker, mode, entry, tp1, tp2, sl):
 # ==========================================
 # 1. 터미널 UI 및 환경 설정
 # ==========================================
+# 🔥 V5 Pro 당일 주도주 스크리너 모듈
+# ==========================================
+@st.cache_data(ttl=300) # yfinance 과부하 방지용 5분 캐싱
+def get_v5_pro_screener():
+    # 단타용 고변동성/빅테크/코인관련주/밈주식 감시 리스트
+    tickers = [
+        "NVDA", "TSLA", "MSTR", "AMD", "COIN", "SMCI", "MARA", 
+        "PLTR", "ARM", "AAPL", "META", "AMZN", "NFLX", "CRWD", "SOFI"
+    ]
+    
+    results = []
+    for t in tickers:
+        try:
+            stock = yf.Ticker(t)
+            hist = stock.history(period="1mo", interval="1d")
+            if len(hist) < 20: continue
+            
+            # 1. ATR (일일 변동성 비율)
+            hist['TR'] = hist['High'] - hist['Low']
+            atr = hist['TR'].rolling(14).mean().iloc[-1]
+            close_price = hist['Close'].iloc[-1]
+            atr_pct = (atr / close_price) * 100
+            
+            # 2. RVOL (최근 20일 평균 대비 오늘 거래량 비율)
+            avg_vol = hist['Volume'].iloc[-21:-1].mean()
+            today_vol = hist['Volume'].iloc[-1]
+            rvol = today_vol / avg_vol if avg_vol > 0 else 0
+            
+            # 3. Gap (전일 종가 대비 당일 시가 갭)
+            yest_close = hist['Close'].iloc[-2]
+            today_open = hist['Open'].iloc[-1]
+            gap_pct = ((today_open - yest_close) / yest_close) * 100
+            
+            # 🎯 V5 단타 타겟 조건: 거래량 폭발 OR 높은 변동성 OR 뚜렷한 갭
+            if rvol > 1.2 or atr_pct > 3.0 or abs(gap_pct) > 1.5:
+                # 세력 개입 점수 (RVOL에 가장 큰 가중치 10배)
+                score = (rvol * 10) + (atr_pct * 2) + abs(gap_pct)
+                
+                results.append({
+                    "티커": t,
+                    "Gap(%)": gap_pct,
+                    "RVOL": rvol,
+                    "ATR(%)": atr_pct,
+                    "세력점수": score
+                })
+        except Exception:
+            continue
+            
+    df_res = pd.DataFrame(results)
+    if not df_res.empty:
+        # 점수순 정렬 및 시각적 포맷팅
+        df_res = df_res.sort_values(by="세력점수", ascending=False).reset_index(drop=True)
+        df_res['Gap(%)'] = df_res['Gap(%)'].apply(lambda x: f"{x:+.2f}%")
+        df_res['RVOL'] = df_res['RVOL'].apply(lambda x: f"{x:.2f}x")
+        df_res['ATR(%)'] = df_res['ATR(%)'].apply(lambda x: f"{x:.2f}%")
+        df_res['세력점수'] = df_res['세력점수'].apply(lambda x: f"{x:.1f}")
+    return df_res
+
+# 사이드바 UI에 스크리너 표시
+with st.sidebar:
+    st.markdown("---")
+    st.header("🔥 오늘의 V5 단타 타겟 (Top 5)")
+    st.caption("거래량(RVOL) 및 변동성 기반 세력 개입 종목 자동 탐지")
+    
+    with st.spinner("주도주 스캐닝 중..."):
+        df_hot = get_v5_pro_screener()
+        if not df_hot.empty:
+            st.dataframe(
+                df_hot.head(5), 
+                use_container_width=True,
+                hide_index=True
+            )
+            top_ticker = df_hot.iloc[0]['티커']
+            st.success(f"💡 시스템 추천: 오늘은 **{top_ticker}** (세력점수 1위) 공략을 권장합니다.")
+        else:
+            st.warning("현재 기준 V5 엔진에 적합한 주도주가 없습니다. 관망을 권장합니다.")
+
+# ==========================================
 st.set_page_config(page_title="Ultimate Quant Terminal V5", layout="wide", initial_sidebar_state="expanded")
 
 if 'last_alert_time' not in st.session_state:
