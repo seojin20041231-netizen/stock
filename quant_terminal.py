@@ -238,10 +238,11 @@ if ticker:
         with st.spinner(f"{ticker} 정밀 분석 중..."):
             try:
                 stock = yf.Ticker(ticker)
-                df = stock.history(period="5d", interval="1m", prepost=True)
-                df_15m = stock.history(period="1mo", interval="15m", prepost=True)
+                df = stock.history(period="5d", interval="1m", prepost=False)
+                df_15m = stock.history(period="1mo", interval="15m", prepost=False)
                 
                 if not df.empty and not df_15m.empty:
+                    # 매크로 ATR 및 CHOP 계산
                     df_15m['TR'] = np.maximum(df_15m['High'] - df_15m['Low'], np.maximum(abs(df_15m['High'] - df_15m['Close'].shift(1)), abs(df_15m['Low'] - df_15m['Close'].shift(1))))
                     df_15m['ATR'] = df_15m['TR'].rolling(window=14).mean()
                     df_15m['recent_macro_low'] = df_15m['Low'].rolling(15).min()
@@ -260,14 +261,8 @@ if ticker:
                     df['NY_Time'] = df.index.tz_convert('America/New_York') if df.index.tzinfo else df.index
                     df['Date_NY'] = df['NY_Time'].dt.date
                     df['Time_NY'] = df['NY_Time'].dt.time
-                    
-                    is_regular = (df['Time_NY'] >= pd.to_datetime('09:30').time()) & (df['Time_NY'] < pd.to_datetime('16:00').time())
-                    daily_data = df[is_regular].groupby('Date_NY').agg({'High': 'max', 'Low': 'min'}).shift(1)
-                    df = df.merge(daily_data.rename(columns={'High': 'PDH', 'Low': 'PDL'}), left_on='Date_NY', right_index=True, how='left')
 
-                    df['Sweep_PDL'] = (df['Low'] < df['PDL']) & (df['Close'] > df['PDL'])
-                    df['Sweep_PDH'] = (df['High'] > df['PDH']) & (df['Close'] < df['PDH'])
-
+                    # VWAP & CVD 계산
                     df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
                     df['VWAP'] = df.groupby('Date_NY').apply(lambda x: (x['Typical_Price'] * x['Volume']).cumsum() / x['Volume'].cumsum()).reset_index(level=0, drop=True)
 
@@ -275,78 +270,109 @@ if ticker:
                     df['CLV'] = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / hl_diff
                     df['Volume_Delta'] = df['Volume'] * df['CLV']
                     df['CVD'] = df.groupby('Date_NY')['Volume_Delta'].cumsum()
+                    df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
 
-                    money_flow = df['Typical_Price'] * df['Volume']
-                    pf = np.where(df['Typical_Price'] > df['Typical_Price'].shift(1), money_flow, 0)
-                    nf = np.where(df['Typical_Price'] < df['Typical_Price'].shift(1), money_flow, 0)
-                    df['MFI'] = (100 - (100 / (1 + (pd.Series(pf, index=df.index).rolling(14).sum() / (pd.Series(nf, index=df.index).rolling(14).sum() + 1e-5))))).fillna(50)
+                    # 지지/저항 및 신호용 변수
+                    recent_20_low_1m = df['Low'].rolling(20).min().shift(1)
+                    recent_20_high_1m = df['High'].rolling(20).max().shift(1)
 
-                    df['CVD_Bull_Div'] = (df['Low'] <= df['Low'].rolling(14).min().shift(1)) & (df['CVD'] > df['CVD'].rolling(14).min().shift(1))
-                    df['CVD_Bear_Div'] = (df['High'] >= df['High'].rolling(14).max().shift(1)) & (df['CVD'] < df['CVD'].rolling(14).max().shift(1))
-
-                    today_regular = df[(df['Date_NY'] == df['Date_NY'].iloc[-1]) & is_regular]
+                    today_regular = df[df['Date_NY'] == df['Date_NY'].iloc[-1]]
                     session_poc = df['VWAP'].iloc[-1]
                     if not today_regular.empty:
                         hist, bins = np.histogram(today_regular['Close'], bins=30, weights=today_regular['Volume'])
                         session_poc = (bins[np.argmax(hist)] + bins[np.argmax(hist)+1]) / 2
 
-                    recent_20_low_1m = df['Low'].rolling(20).min().shift(1)
-                    recent_20_high_1m = df['High'].rolling(20).max().shift(1)
-                    df['Liq_Sweep_Bull'] = (df['Low'] < recent_20_low_1m) & (df['Close'] > recent_20_low_1m)
-                    df['Liq_Sweep_Bear'] = (df['High'] > recent_20_high_1m) & (df['Close'] < recent_20_high_1m)
-
                     current = df.iloc[-1]
                     c_price, c_vwap, m_chop = current['Close'], current['VWAP'], current['macro_CHOP']
                     ny_time = current['Time_NY']
+                    
+                    # 15분 개장 휩소 필터링
                     is_market_open_noise = ny_time >= pd.to_datetime('09:30').time() and ny_time < pd.to_datetime('09:45').time()
 
                     position = "관망 ⏳"
+                    signal_reason = ""
                     alerts = []
-                    if is_market_open_noise: alerts.append('<div class="alert-box alert-info">🛑 <b>시간대 필터:</b> 개장 직후 15분은 휩소 구간으로 진입이 금지됩니다.</div>')
-                    elif m_chop > 61.8: alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다. 박스권 매매를 권장합니다.</div>')
-                    else:
-                        if (current['Sweep_PDL'] or current['CVD_Bull_Div'] or (current['Liq_Sweep_Bull'] and current['MFI'] < 40)) and (c_price > c_vwap) and (current['Volume_Delta'] > 0): position = "롱(매수) 진입 🟢"
-                        elif (current['Sweep_PDH'] or current['CVD_Bear_Div'] or (current['Liq_Sweep_Bear'] and current['MFI'] > 60)) and (c_price < c_vwap) and (current['Volume_Delta'] < 0): position = "숏(매도) 진입 🔴"
-                    
+
+                    if is_market_open_noise:
+                        alerts.append('<div class="alert-box alert-info">🛑 <b>시간대 필터:</b> 개장 직후 15분은 휩소 구간으로 진입이 금지됩니다.</div>')
+                    elif m_chop > 61.8:
+                        alerts.append('<div class="alert-box alert-warning">⚠️ <b>매크로 횡보 경고:</b> 15분봉 CHOP 지수가 높습니다. 박스권 대응을 권장합니다.</div>')
+
+                    # ==========================================
+                    # 🎯 레이더 조건과 완벽 동기화된 진입 판정 로직
+                    # ==========================================
+                    vwap_dist_pct = abs(c_price - c_vwap) / c_vwap * 100
+                    cvd_rising = current['CVD'] > df['CVD'].iloc[-2]
+                    vol_burst = current['Volume'] > (current['Vol_SMA20'] * 2.0)
+                    breakout = (c_price > recent_20_high_1m) and (current['Volume_Delta'] > 0)
+
+                    # 1. VWAP 반등/눌림목 조건 (레이더 ⏳ 연동)
+                    if vwap_dist_pct <= 0.8:
+                        if c_price >= c_vwap and cvd_rising:
+                            position = "롱(매수) 진입 🟢"
+                            signal_reason = "VWAP 상단 지지 및 CVD 매수 우위"
+                        elif c_price < c_vwap and not cvd_rising:
+                            position = "숏(매도) 진입 🔴"
+                            signal_reason = "VWAP 하단 저항 및 CVD 매도 우위"
+
+                    # 2. 거래량 폭발 / 모멘텀 돌파 조건 (레이더 🐋, 📈 연동)
+                    elif vol_burst or breakout:
+                        if current['Close'] > current['Open']:
+                            position = "롱(매수) 진입 🟢"
+                            signal_reason = "강한 매수 수급 유입 / 단기 고점 돌파"
+                        else:
+                            position = "숏(매도) 진입 🔴"
+                            signal_reason = "강한 매도 수급 유입 / 단기 저점 이탈"
+
+                    # 3. V5 정밀 스위핑 조건 (레이더 🚨 연동)
+                    elif (current['Low'] < recent_20_low_1m) and (c_price > recent_20_low_1m) and (c_price > c_vwap):
+                        position = "롱(매수) 진입 🟢"
+                        signal_reason = "매물대 Liquidity Sweep 완료 후 반등"
+
                     for alert in alerts: st.markdown(alert, unsafe_allow_html=True)
                     
                     capital = 1000.0
                     is_short_pos = "숏" in position
-                    is_active_signal = position != "관망 ⏳" and not is_market_open_noise
+                    is_active_signal = (position != "관망 ⏳") and not is_market_open_noise
                     
                     if not is_active_signal:
                         entry_point, stop_loss, risk_per_share, shares_to_buy, target_1, target_2, sl_pct = 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0
                     else:
-                        m_atr = current['macro_atr'] if pd.notna(current['macro_atr']) else 1.0
+                        m_atr = current['macro_atr'] if pd.notna(current['macro_atr']) and current['macro_atr'] > 0 else (c_price * 0.005)
+                        entry_point = c_price
+                        
                         if is_short_pos:
-                            entry_point = c_price if c_price < (c_vwap * 0.998) else c_vwap
-                            stop_loss = max(current['macro_high'], entry_point + (m_atr * 1.5)) if pd.notna(current['macro_high']) else entry_point + (m_atr * 1.5)
+                            stop_loss = entry_point + (m_atr * 1.5)
                         else:
-                            entry_point = c_price if c_price > (c_vwap * 1.002) else c_vwap
-                            stop_loss = min(current['macro_low'], entry_point - (m_atr * 1.5)) if pd.notna(current['macro_low']) else entry_point - (m_atr * 1.5)
+                            stop_loss = entry_point - (m_atr * 1.5)
                         
                         risk_per_share = abs(entry_point - stop_loss)
-                        sl_pct = (risk_per_share / entry_point) * 100
+                        sl_pct = (risk_per_share / entry_point) * 100 if entry_point > 0 else 0
+                        
                         target_1 = entry_point - (risk_per_share * 1.2) if is_short_pos else entry_point + (risk_per_share * 1.2)
                         target_2 = entry_point - (risk_per_share * 2.0) if is_short_pos else entry_point + (risk_per_share * 2.0)
                         shares_to_buy = min(int((capital * 0.02) / risk_per_share), int(capital / entry_point)) if risk_per_share > 0 else 0
 
+                        # 디스코드 알림 전송
                         last_time_str = str(df.index[-1])
                         if ticker not in st.session_state.last_alert_time or st.session_state.last_alert_time.get(ticker) != last_time_str:
                             send_discord_alert(webhook_url, ticker, position, entry_point, target_1, target_2, stop_loss)
                             st.session_state.last_alert_time[ticker] = last_time_str
                     
+                    # 대시보드 UI 출력
                     st.markdown("### 📊 실시간 CVD & 시장 구조")
                     m1, m2, m3, m4 = st.columns(4)
-                    with m1: st.markdown(f'<div class="card"><div class="title-text">현재가</div><div class="value-text {"up" if c_price >= df.iloc[-2]["Close"] else "down"}">${c_price:.2f}</div></div>', unsafe_allow_html=True)
+                    with m1: st.markdown(f'<div class="card"><div class="title-text">현재가</div><div class="value-text {"up" if len(df) > 1 and c_price >= df.iloc[-2]["Close"] else "down"}">${c_price:.2f}</div></div>', unsafe_allow_html=True)
                     with m2: st.markdown(f'<div class="card"><div class="title-text">CVD (체결강도)</div><div class="value-text {"up" if current["CVD"] > 0 else "down"}">{current["CVD"]:,.0f}</div></div>', unsafe_allow_html=True)
                     with m3: st.markdown(f'<div class="card"><div class="title-text">세션 POC</div><div class="value-text neutral">${session_poc:.2f}</div></div>', unsafe_allow_html=True)
                     with m4: st.markdown(f'<div class="card"><div class="title-text">상태</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
 
                     c1, c2, c3 = st.columns(3)
                     with c1: 
-                        if entry_point > 0: st.markdown(f'<div class="card" style="border-top: 3px solid {"#ef5350" if is_short_pos else "#26a69a"};"><h4 style="color:{"#ef5350" if is_short_pos else "#26a69a"};">{position}</h4><h2 style="margin:0;">${entry_point:.2f}</h2><p style="margin-top:10px; font-size:14px; font-weight:bold;">💡 진입 수량: {shares_to_buy} 주</p></div>', unsafe_allow_html=True)
-                        else: st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">관망 (대기 중)</h4><h2 style="margin:0; color:#8a93a6;">-</h2><p style="margin-top:10px; font-size:14px;">조건 성립 대기</p></div>', unsafe_allow_html=True)
+                        if entry_point > 0: 
+                            st.markdown(f'<div class="card" style="border-top: 3px solid {"#ef5350" if is_short_pos else "#26a69a"};"><h4 style="color:{"#ef5350" if is_short_pos else "#26a69a"};">{position}</h4><h2 style="margin:0;">${entry_point:.2f}</h2><p style="margin-top:5px; font-size:12px; color:#8a93a6;">{signal_reason}</p><p style="margin-top:5px; font-size:14px; font-weight:bold;">💡 진입 수량: {shares_to_buy} 주</p></div>', unsafe_allow_html=True)
+                        else: 
+                            st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">관망 (대기 중)</h4><h2 style="margin:0; color:#8a93a6;">-</h2><p style="margin-top:10px; font-size:14px;">조건 성립 대기</p></div>', unsafe_allow_html=True)
                     with c2:
                         if entry_point > 0: st.markdown(f'<div class="card" style="border-top: 3px solid #42a5f5;"><h4 style="color:#42a5f5;">🔵 익절 목표가</h4><p style="margin:0; font-size:16px;">1차 (1:1.2): <b>${target_1:.2f}</b></p><p style="margin:5px 0 0 0; font-size:16px;">2차 (1:2.0): <b>${target_2:.2f}</b></p></div>', unsafe_allow_html=True)
                         else: st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">🔵 익절 목표가</h4><h2 style="margin:0; color:#8a93a6;">-</h2></div>', unsafe_allow_html=True)
@@ -354,24 +380,23 @@ if ticker:
                         if entry_point > 0: st.markdown(f'<div class="card" style="border-top: 3px solid #ff9800;"><h4 style="color:#ff9800;">⚠️ 구조적 손절가</h4><h2 style="margin:0;">${stop_loss:.2f} <span style="font-size:15px; color:#ef5350;">(-{sl_pct:.2f}%)</span></h2></div>', unsafe_allow_html=True)
                         else: st.markdown(f'<div class="card" style="border-top: 3px solid #f5cb5c;"><h4 style="color:#f5cb5c;">⚠️ 구조적 손절가</h4><h2 style="margin:0; color:#8a93a6;">-</h2></div>', unsafe_allow_html=True)
 
+                    # 차트 출력
                     st.markdown("### 📈 차트 X-Ray (CVD 포함)")
                     df_plot = df.tail(150)
                     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.55, 0.2, 0.25])
                     
                     fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close']), row=1, col=1)
                     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VWAP'], line=dict(color='#ffeb3b', width=2), name="VWAP"), row=1, col=1)
-                    if pd.notna(current['PDH']): fig.add_hline(y=current['PDH'], line_dash="dot", line_color="#ff5252", row=1, col=1)
-                    if pd.notna(current['PDL']): fig.add_hline(y=current['PDL'], line_dash="dot", line_color="#448aff", row=1, col=1)
                     
                     vol_colors = ['#26a69a' if row['Close'] >= row['Open'] else '#ef5350' for idx, row in df_plot.iterrows()]
                     fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=vol_colors), row=2, col=1)
-                    
                     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['CVD'], line=dict(color='#00e676', width=2), name="CVD"), row=3, col=1)
                     
                     fig.update_layout(height=750, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='#0b0e14', plot_bgcolor='#131722', showlegend=False, xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
+                st.error(f"데이터 분석 중 오류가 발생했습니다: {e}")
+
 
     with tab_backtest:
         st.info("시뮬레이터 탭에서는 과거 데이터를 바탕으로 한 전략의 승률과 자산 변화 곡선을 제공합니다. 메인 로직과 동일하게 적용되어 구동됩니다.")
