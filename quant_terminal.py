@@ -48,10 +48,12 @@ if ticker:
                 st.stop()
 
             # 시간대 설정 (뉴욕 시간 기준)
+                        # 시간대 설정 (뉴욕 시간 기준 - 서버 호환성 반영)
             if df.index.tz is None:
-                df.index = df.index.tz_localize('UTC').tz_convert('US/Eastern')
+                df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
             else:
-                df.index = df.index.tz_convert('US/Eastern')
+                df.index = df.index.tz_convert('America/New_York')
+
 
             # ==========================================
             # 3. 🧠 최상위 퀀트 알고리즘 (벡터화 연산 최적화)
