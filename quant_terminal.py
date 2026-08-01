@@ -2,254 +2,186 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import warnings
-import pytz
+from datetime import datetime
 
-warnings.filterwarnings('ignore')
+# --- [1] 페이지 및 기본 설정 ---
+st.set_page_config(page_title="미국 급등주 검색기", layout="centered")
 
-# ==========================================
-# 1. 터미널 UI 및 환경 설정
-# ==========================================
-st.set_page_config(page_title="Ultimate Quant Terminal", layout="wide", initial_sidebar_state="collapsed")
-
+# CSS 스타일링 (다크 테마 및 커스텀 배지/블록)
 st.markdown("""
-    <style>
-    .stApp { background-color: #0b0e14; color: #d1d4dc; font-family: 'Inter', sans-serif; }
-    .card { background-color: #131722; border: 1px solid #2a2e39; border-radius: 8px; padding: 15px; margin-bottom: 10px; }
-    .title-text { color: #8a93a6; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-    .value-text { font-size: 24px; font-weight: 700; margin-top: 5px; }
-    .up { color: #26a69a; } .down { color: #ef5350; } .neutral { color: #f5cb5c; }
-    .whale-alert { background-color: rgba(239, 83, 80, 0.1); border-left: 4px solid #ef5350; padding: 10px; margin-top: 10px; }
-    .whale-buy { background-color: rgba(38, 166, 154, 0.1); border-left: 4px solid #26a69a; padding: 10px; margin-top: 10px; }
-    hr { border-color: #2a2e39; }
-    </style>
+<style>
+    .stApp { background-color: #121212; color: #FFFFFF; }
+    .card-container { background-color: #1E1E1E; padding: 20px; border-radius: 12px; border: 1px solid #333; }
+    .badge-red { background-color: #4A1919; color: #FF5252; padding: 4px 10px; border-radius: 15px; font-size: 13px; font-weight: bold; border: 1px solid #FF5252;}
+    .badge-orange { background-color: #4A3519; color: #FFB020; padding: 4px 10px; border-radius: 15px; font-size: 13px; font-weight: bold; border: 1px solid #FFB020;}
+    .badge-green { background-color: #193D24; color: #4CAF50; padding: 4px 10px; border-radius: 15px; font-size: 13px; font-weight: bold; border: 1px solid #4CAF50;}
+    .pill-orange { background-color: rgba(255, 176, 32, 0.1); color: #FFB020; padding: 4px 10px; border-radius: 6px; border: 1px solid #FFB020; font-size: 12px; margin-right: 8px;}
+    .pill-gray { background-color: #2D2D2D; color: #A0A0A0; padding: 4px 10px; border-radius: 6px; font-size: 12px;}
+    .warning-block { background-color: rgba(255, 82, 82, 0.1); color: #FF5252; padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-top: 6px; border: 1px solid rgba(255, 82, 82, 0.3);}
+    .metric-label { font-size: 12px; color: #888888; margin-bottom: 2px;}
+    .metric-val { font-size: 14px; font-weight: bold; }
+    .val-green { color: #4CAF50; }
+    .val-red { color: #FF5252; }
+    .val-orange { color: #FFB020; }
+    .bottom-warning { background-color: rgba(255, 176, 32, 0.1); color: #FFB020; padding: 10px; border-radius: 8px; font-size: 12px; text-align: center; margin-top: 20px;}
+</style>
 """, unsafe_allow_html=True)
 
-st.title("👁️‍🗨️ 세력(주포) 추적 & SMC 기반 무한 단타 시스템 (v2.0)")
-st.caption("⚠️ 주의: Yahoo Finance 데이터는 실시간 호가가 아니므로 지연이 발생할 수 있습니다. 보조 지표로만 활용하세요.")
+# --- [2] 데이터 수집 및 분석 알고리즘 ---
+@st.cache_data(ttl=60) # 1분마다 캐시 갱신
+def get_stock_data(ticker_symbol):
+    ticker = yf.Ticker(ticker_symbol)
+    info = ticker.info
+    
+    # 당일 5분봉 데이터 가져오기 (VWAP 및 거래량 계산용)
+    hist = ticker.history(period="1d", interval="5m")
+    
+    # 기본 변수 추출 및 예외 처리 (yfinance 누락 대비)
+    current_price = info.get('currentPrice', info.get('regularMarketPrice', 0.0))
+    prev_close = info.get('previousClose', 0.0)
+    market_cap = info.get('marketCap', 0)
+    float_shares = info.get('floatShares', info.get('sharesOutstanding', 1)) # float 없으면 총발행주식 대체
+    volume_today = info.get('regularMarketVolume', 0)
+    
+    if hist.empty:
+        vwap = current_price
+        vol_30m = 0
+    else:
+        # VWAP 계산: (고가+저가+종가)/3 * 거래량 누적 / 거래량 누적
+        v = hist['Volume']
+        tp = (hist['High'] + hist['Low'] + hist['Close']) / 3
+        vwap = (tp * v).cumsum() / v.cumsum()
+        vwap = vwap.iloc[-1]
+        
+        # 최근 30분 수급 (거래대금)
+        recent_hist = hist.tail(6) # 5분봉 * 6 = 30분
+        vol_30m = (recent_hist['Close'] * recent_hist['Volume']).sum()
 
-# ==========================================
-# 2. 데이터 수집
-# ==========================================
-col1, col2, col3 = st.columns([1, 2, 2])
-with col1:
-    ticker = st.text_input("티커 입력 (예: NVDA, TSLA, SPY)", value="TSLA").upper().strip()
+    # 지표 계산
+    change_pct = ((current_price - prev_close) / prev_close * 100) if prev_close else 0
+    turnover_rate = volume_today / float_shares if float_shares else 0
+    
+    # 🎯 대장주 판별 알고리즘 스코어링
+    score = 0
+    warnings = []
+    
+    if float_shares < 10_000_000: score += 30
+    elif float_shares < 20_000_000: score += 10
+    else: warnings.append(f"⚠️ 무거운 유통물량 ({float_shares/1000000:.1f}M)")
 
-if ticker:
-    with st.spinner("최적화된 퀀트 알고리즘으로 데이터를 분석 중입니다..."):
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="5d", interval="1m", prepost=True)
-            
-            if df.empty:
-                st.error("데이터가 없습니다. 티커를 확인하거나 장기 휴장일인지 확인하세요.")
-                st.stop()
+    if turnover_rate >= 1.0: score += 30
+    elif turnover_rate >= 0.5: score += 10
+    
+    if current_price > vwap: score += 20
+    if vol_30m >= 2_000_000: score += 20
+    
+    if current_price < 1.0: warnings.append("⚠️ $1 미만 (나스닥 상장유지 요건 위험)")
+    if market_cap < 10_000_000: warnings.append(f"⚠️ 초소형 시총 ${(market_cap/1000000):.1f}M (조작·급변동 취약)")
 
-            # 시간대 설정 (뉴욕 시간 기준)
-                        # 시간대 설정 (뉴욕 시간 기준 - 서버 호환성 반영)
-            if df.index.tz is None:
-                df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
-            else:
-                df.index = df.index.tz_convert('America/New_York')
+    # 스코어에 따른 상태 결정
+    if score >= 70:
+        status_html = '<span class="badge-green">🔵 관심 (대장주)</span>'
+    elif score >= 40:
+        status_html = '<span class="badge-orange">🟡 주의 (단타용)</span>'
+    else:
+        status_html = '<span class="badge-red">🔴 회피 (설거지)</span>'
 
+    # 원화 환산 (단순 계산용 상수)
+    krw_price = current_price * 1350 
 
-            # ==========================================
-            # 3. 🧠 최상위 퀀트 알고리즘 (벡터화 연산 최적화)
-            # ==========================================
-            
-            # [A] 기본 가격 및 변동성 (ATR), 거시 추세 (EMA 200)
-            df['H-L'] = df['High'] - df['Low']
-            df['H-PC'] = np.abs(df['High'] - df['Close'].shift(1))
-            df['L-PC'] = np.abs(df['Low'] - df['Close'].shift(1))
-            df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-            df['ATR'] = df['TR'].rolling(window=14).mean()
-            df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean() # 1분봉 기준 약 3.3시간 장기 추세
+    return {
+        'price': current_price, 'krw': krw_price, 'change': change_pct,
+        'market_cap': market_cap, 'float': float_shares, 'volume': volume_today,
+        'turnover': turnover_rate, 'status': status_html, 'warnings': warnings,
+        'vwap': vwap, 'vol_30m': vol_30m
+    }
 
-            # [B] 세션 분리형 기관 평단가 (VWAP) - 정규장 리셋
-            df['Date'] = df.index.date
-            df['Time'] = df.index.time
-            # 프리마켓(04:00~09:30)과 정규장(09:30~16:00)을 분리하는 세션 ID 생성
-            df['Session_Type'] = np.where(df['Time'] >= pd.to_datetime('09:30').time(), 'Reg', 'Pre')
-            df['Session_ID'] = df['Date'].astype(str) + "_" + df['Session_Type']
-            
-            df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
-            df['VWAP'] = df.groupby('Session_ID').apply(
-                lambda x: (x['Typical_Price'] * x['Volume']).cumsum() / x['Volume'].cumsum()
-            ).reset_index(level=0, drop=True)
-            
-            # [C] 🐋 세력 매집/분산 추적 (OBV & MFI 벡터화 최적화)
-            # OBV
-            obv_change = np.where(df['Close'] > df['Close'].shift(1), df['Volume'], 
-                         np.where(df['Close'] < df['Close'].shift(1), -df['Volume'], 0))
-            df['OBV'] = obv_change.cumsum()
-            df['OBV_EMA'] = df['OBV'].ewm(span=20).mean()
+# --- [3] UI 렌더링 ---
+st.title("🚀 동전주 프리마켓 추적기")
+target_ticker = st.text_input("종목 티커 입력 (예: CISS, STAK, XRX)", "CISS").upper()
 
-            # MFI
-            raw_mf = df['Typical_Price'] * df['Volume']
-            pos_mf = np.where(df['Typical_Price'] > df['Typical_Price'].shift(1), raw_mf, 0)
-            neg_mf = np.where(df['Typical_Price'] < df['Typical_Price'].shift(1), raw_mf, 0)
-            pf_sum = pd.Series(pos_mf).rolling(window=14).sum()
-            nf_sum = pd.Series(neg_mf).rolling(window=14).sum()
-            mfi_ratio = pf_sum / (nf_sum + 1e-10) # 0 나누기 방지
-            df['MFI'] = 100 - (100 / (1 + mfi_ratio))
-            df['MFI'].fillna(50, inplace=True)
+if target_ticker:
+    with st.spinner("데이터 분석 중..."):
+        data = get_stock_data(target_ticker)
+        
+    st.markdown('<div class="card-container">', unsafe_allow_html=True)
+    
+    # 상단 헤더
+    col1, col2 = st.columns([6, 4])
+    with col1:
+        st.markdown(f"### {target_ticker} <span style='font-size: 14px; color: #888;'>NASDAQ</span>", unsafe_allow_html=True)
+        st.markdown(data['status'], unsafe_allow_html=True)
+    with col2:
+        price_color = "val-green" if data['change'] >= 0 else "val-red"
+        st.markdown(f"<div style='text-align: right;'><span style='font-size: 28px; font-weight: bold;' class='{price_color}'>${data['price']:.2f}</span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align: right; color: #888; font-size: 14px;'>≈ {int(data['krw']):,}원</div>", unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 태그 및 경고 블록
+    st.markdown(f"""
+        <span class="pill-orange">휴면→각성 ⚡</span>
+        <span class="pill-gray">살아있는 유량 ${(data['vol_30m']/1000000):.1f}M / 30분</span>
+    """, unsafe_allow_html=True)
+    
+    for warning in data['warnings']:
+        st.markdown(f"<div class='warning-block'>{warning}</div>", unsafe_allow_html=True)
+        
+    st.markdown("<hr style='border-color: #333;'>", unsafe_allow_html=True)
+    
+    # 데이터 그리드 1 (거래 및 수급 정보)
+    g1_c1, g1_c2, g1_c3, g1_c4 = st.columns(4)
+    with g1_c1:
+        st.markdown("<div class='metric-label'>등락률</div>", unsafe_allow_html=True)
+        sign = "+" if data['change'] > 0 else ""
+        st.markdown(f"<div class='metric-val {price_color}'>{sign}{data['change']:.2f}%</div>", unsafe_allow_html=True)
+    with g1_c2:
+        st.markdown("<div class='metric-label'>당일 거래량</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val'>{int(data['volume']):,}</div>", unsafe_allow_html=True)
+    with g1_c3:
+        st.markdown("<div class='metric-label'>시가총액</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val'>${(data['market_cap']/1000000):.1f}M</div>", unsafe_allow_html=True)
+    with g1_c4:
+        st.markdown("<div class='metric-label'>유통 회전율</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val val-orange'>x{data['turnover']:.2f}</div>", unsafe_allow_html=True)
 
-            # [D] 📊 매물대 분석 (Volume Profile - POC) - 캔들 평균가 사용
-            recent_df = df.tail(300)
-            hist, bins = np.histogram(recent_df['Typical_Price'], bins=30, weights=recent_df['Volume'])
-            max_vol_idx = np.argmax(hist)
-            poc_price = (bins[max_vol_idx] + bins[max_vol_idx+1]) / 2
+    st.markdown("<br>", unsafe_allow_html=True)
 
-            # [E] ⚡ 스마트 머니 콘셉트 (SMC) & FVG 지지선 추출
-            df['FVG_Bull'] = (df['Low'] > df['High'].shift(2)) & (df['Close'].shift(1) > df['Open'].shift(1))
-            df['FVG_Bear'] = (df['High'] < df['Low'].shift(2)) & (df['Close'].shift(1) < df['Open'].shift(1))
-            # 최근 Bull FVG의 하단을 강력한 지지선으로 기록
-            df['Last_FVG_Support'] = np.where(df['FVG_Bull'], df['High'].shift(2), np.nan)
-            df['Last_FVG_Support'].ffill(inplace=True)
+    # 데이터 그리드 2 (매매 레벨 - VWAP 기반 러프한 계산)
+    st.markdown("**매매 레벨 (규칙형 참고치)**")
+    entry_price = data['vwap']
+    res_1 = entry_price * 1.15
+    res_2 = entry_price * 1.30
+    support = entry_price * 0.90
+    stop_loss = entry_price * 0.85
+    
+    g2_c1, g2_c2, g2_c3 = st.columns(3)
+    with g2_c1:
+        st.markdown("<div class='metric-label'>VWAP 진입가</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val'>${entry_price:.2f}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label' style='margin-top:10px;'>눌림목</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val val-orange'>${(entry_price*0.95):.2f}</div>", unsafe_allow_html=True)
+    with g2_c2:
+        st.markdown("<div class='metric-label'>1차 매도가</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val val-green'>${res_1:.2f}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label' style='margin-top:10px;'>지지선</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val val-red'>${support:.2f}</div>", unsafe_allow_html=True)
+    with g2_c3:
+        st.markdown("<div class='metric-label'>2차 매도가</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val val-green'>${res_2:.2f}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='metric-label' style='margin-top:10px;'>손절가</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-val val-red'>${stop_loss:.2f}</div>", unsafe_allow_html=True)
 
-            # [F] 🚨 세력 거래량 스파이크 감지 (장 개시 15분 필터링 적용)
-            is_open_rush = (df['Time'] >= pd.to_datetime('09:30').time()) & (df['Time'] <= pd.to_datetime('09:45').time())
-            df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
-            # 장 초반은 평소 대비 10배, 평시에는 3.5배를 스파이크로 간주
-            spike_threshold = np.where(is_open_rush, df['Vol_SMA20'] * 10, df['Vol_SMA20'] * 3.5)
-            
-            df['Whale_Spike_Buy'] = (df['Volume'] > spike_threshold) & (df['Close'] > df['Open'])
-            df['Whale_Spike_Sell'] = (df['Volume'] > spike_threshold) & (df['Close'] < df['Open'])
+    st.markdown("<br>", unsafe_allow_html=True)
 
-            # ==========================================
-            # 4. 실시간 상황 및 판독
-            # ==========================================
-            current = df.iloc[-1]
-            prev = df.iloc[-2]
-            
-            c_price = current['Close']
-            c_vwap = current['VWAP']
-            c_atr = current['ATR']
-            trend_200 = current['EMA_200']
-            fvg_support = current['Last_FVG_Support']
-            
-            # 주포 상태 판독
-            whale_status = "중립 (관망 중)"
-            whale_color = "neutral"
-            if current['OBV'] > current['OBV_EMA'] and current['MFI'] > 50:
-                whale_status = "매집 진행 중 (세력 유입 🟢)"
-                whale_color = "up"
-            elif current['OBV'] < current['OBV_EMA'] and current['MFI'] < 50:
-                whale_status = "분산 진행 중 (세력 이탈 🔴)"
-                whale_color = "down"
+    # 하단 링크 버튼
+    l_c1, l_c2, l_c3 = st.columns(3)
+    with l_c1: st.button("📰 야후 뉴스", use_container_width=True)
+    with l_c2: st.button("📄 공시·보도자료", use_container_width=True)
+    with l_c3: st.button("🏢 기업정보", use_container_width=True)
 
-            # 스파이크 알림 (최근 5분)
-            recent_spikes = df.tail(5)
-            if recent_spikes['Whale_Spike_Buy'].sum() > 0:
-                whale_alert = f'<div class="whale-buy">🔥 <b>세력 포착:</b> 최근 5분 내 기관급 대량 매수 감지!</div>'
-            elif recent_spikes['Whale_Spike_Sell'].sum() > 0:
-                whale_alert = f'<div class="whale-alert">⚠️ <b>비상:</b> 최근 5분 내 대량 물량 투하(패닉셀) 감지!</div>'
-            else:
-                whale_alert = ""
+    # 하단 주의사항
+    st.markdown(f"<div class='bottom-warning'>⏱️ 갱신 시점 = 장중(미완성) 봉 · 거래량은 마감까지 더 늘 수 있음 (현재 {int(data['volume']):,})</div>", unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
-            # ==========================================
-            # 5. SMC & 변동성 기반 타점 설계 (안전장치 추가)
-            # ==========================================
-            
-            # [매수 타점] POC, VWAP, FVG 지지선 중 현재가와 가장 가깝고 낮은 가격
-            supports = [s for s in [poc_price, c_vwap, fvg_support] if not pd.isna(s) and s < c_price]
-            entry_point = max(supports) if supports else c_price - c_atr
-            
-            # [익절 타점] ATR 기반
-            target_1 = c_price + (c_atr * 2.0)
-            target_2 = c_price + (c_atr * 3.5)
-            
-            # [손절 타점] 구조적 저점 붕괴 확인 후, 최대 -2% 강제 컷 방어
-            recent_lows = recent_df['Low'].tail(15).min()
-            calc_stop_loss = min(c_price - (c_atr * 1.5), recent_lows)
-            max_loss_cap = c_price * 0.98 # -2% 하드 스탑
-            stop_loss = max(calc_stop_loss, max_loss_cap)
-
-            # [포지션 로직] 거시 추세(EMA200) 필터링 추가
-            position = "관망 ⏳"
-            if c_price > c_vwap and current['MFI'] < 80 and whale_color == "up":
-                if c_price > trend_200:
-                    position = "정배열 롱(매수) 🟢"
-                else:
-                    position = "역추세 단기 반등 (주의) ⚠️"
-            elif c_price < c_vwap and current['MFI'] > 20 and whale_color == "down":
-                if c_price < trend_200:
-                    position = "역배열 숏(매도) 🔴"
-                else:
-                    position = "조정 중 (관망) ⏳"
-
-            # ==========================================
-            # 6. 대시보드 출력
-            # ==========================================
-            if whale_alert: st.markdown(whale_alert, unsafe_allow_html=True)
-            
-            m1, m2, m3, m4 = st.columns(4)
-            with m1: st.markdown(f'<div class="card"><div class="title-text">현재가</div><div class="value-text {"up" if c_price >= prev["Close"] else "down"}">${c_price:.2f}</div></div>', unsafe_allow_html=True)
-            with m2: st.markdown(f'<div class="card"><div class="title-text">세력 매물대 (POC)</div><div class="value-text neutral">${poc_price:.2f}</div><div style="font-size:12px; color:#8a93a6;">최대 거래 밀집 구역</div></div>', unsafe_allow_html=True)
-            with m3: st.markdown(f'<div class="card"><div class="title-text">주포 자금흐름 (OBV)</div><div class="value-text {whale_color}">{whale_status}</div></div>', unsafe_allow_html=True)
-            with m4: st.markdown(f'<div class="card"><div class="title-text">알고리즘 판독</div><div class="value-text {"up" if "롱" in position else "down" if "숏" in position else "neutral"}">{position}</div></div>', unsafe_allow_html=True)
-
-            # ==========================================
-            # 7. 차트 렌더링
-            # ==========================================
-            st.markdown("### 📈 세력 추적 X-Ray 차트 (최근 150분)")
-            df_plot = df.tail(150)
-            
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.6, 0.2, 0.2])
-            
-            # [Row 1] 캔들 + VWAP + EMA200
-            fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='Price'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VWAP'], line=dict(color='#ffeb3b', width=2), name='VWAP (세션)'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_200'], line=dict(color='#ab47bc', width=1.5, dash='dot'), name='EMA 200 (추세)'), row=1, col=1)
-            fig.add_hline(y=poc_price, line_dash="dash", line_color="#b39ddb", annotation_text="POC (매물대)", row=1, col=1)
-            if not pd.isna(fvg_support):
-                fig.add_hline(y=fvg_support, line_dash="dot", line_color="#4caf50", annotation_text="최근 FVG 지지선", row=1, col=1)
-            
-            # [Row 2] 거래량
-            colors = ['#26a69a' if row['Close'] >= row['Open'] else '#ef5350' for idx, row in df_plot.iterrows()]
-            fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
-            
-            # [Row 3] OBV
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['OBV'], line=dict(color='#2196f3', width=2), name='OBV'), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['OBV_EMA'], line=dict(color='#ff9800', width=1, dash='dot'), name='OBV Signal'), row=3, col=1)
-
-            fig.update_layout(height=700, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor='#0b0e14', plot_bgcolor='#131722', font=dict(color='#8a93a6'), showlegend=False, xaxis_rangeslider_visible=False)
-            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#2a2e39')
-            fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#2a2e39')
-            st.plotly_chart(fig, use_container_width=True)
-
-            # ==========================================
-            # 8. 실전 퀀트 매매 전략 시트
-            # ==========================================
-            st.markdown("### 🎯 기관급 동적 매매 시나리오")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown(f"""
-                <div class="card" style="border-top: 3px solid #26a69a;">
-                    <h4 style="color:#26a69a;">🟢 추천 진입 (Entry)</h4>
-                    <p style="font-size:14px; color:#8a93a6;">하단 지지선(POC/VWAP/FVG) 인접 시</p>
-                    <h2 style="margin:0;">${entry_point:.2f}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"""
-                <div class="card" style="border-top: 3px solid #42a5f5;">
-                    <h4 style="color:#42a5f5;">🔵 동적 익절 (Target)</h4>
-                    <p style="font-size:14px; color:#8a93a6;">현재 변동성(ATR) 기반 통계적 도달 범위</p>
-                    <p style="margin:0; font-size:18px;">1차: <b>${target_1:.2f}</b> (절반 매도)</p>
-                    <p style="margin:5px 0 0 0; font-size:18px;">2차: <b>${target_2:.2f}</b> (전량 매도)</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"""
-                <div class="card" style="border-top: 3px solid #ef5350;">
-                    <h4 style="color:#ef5350;">🔴 기계적 손절 (Stop Loss)</h4>
-                    <p style="font-size:14px; color:#8a93a6;">지정가 이탈 또는 최대 -2% 하드스탑</p>
-                    <h2 style="margin:0;">${stop_loss:.2f}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-
-        except Exception as e:
-            st.error(f"시스템 오류 발생: {e}")
