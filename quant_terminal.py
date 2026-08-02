@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 # --- [1] 페이지 및 기본 설정 ---
-st.set_page_config(page_title="미국 프리마켓 갭앤고(Gap & Go) 스캐너", layout="centered")
+st.set_page_config(page_title="미국 프리마켓 갭앤고 스캐너", layout="centered")
 
 st.markdown("""
 <style>
@@ -26,7 +26,6 @@ st.markdown("""
     .val-green { color: #4CAF50; }
     .val-red { color: #FF5252; }
     .val-orange { color: #FFB020; }
-    .news-box { background-color: #263238; padding: 15px; border-radius: 8px; border-left: 4px solid #00BCD4; margin-top: 15px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -40,6 +39,7 @@ def get_stock_data(ticker_symbol):
     info = ticker.info
     
     hist_5m = ticker.history(period="2d", interval="5m", prepost=True)
+    hist_daily = ticker.history(period="1mo") # RVOL 계산용 30일 데이터
     
     current_price = info.get('currentPrice', info.get('regularMarketPrice', 0.0))
     if hist_5m.empty or current_price == 0:
@@ -50,8 +50,9 @@ def get_stock_data(ticker_symbol):
     
     prev_close = info.get('previousClose', 0.0)
     float_shares = info.get('floatShares', 0)
+    short_percent = info.get('shortPercentOfFloat', 0) * 100 if info.get('shortPercentOfFloat') else 0 # 숏 비율
+    avg_daily_volume = hist_daily['Volume'].mean() if not hist_daily.empty else 1
     
-    # 지표 초기화
     vwap = current_price
     pm_high = current_price
     pm_low = current_price
@@ -68,35 +69,29 @@ def get_stock_data(ticker_symbol):
         pm_high = today_hist['High'].max()
         pm_low = today_hist['Low'].min()
         
-        # 윗꼬리(Wick) 매도 압력 분석 (최근 5봉)
         today_hist['Upper_Wick'] = today_hist['High'] - today_hist[['Open', 'Close']].max(axis=1)
         today_hist['Body'] = (today_hist['Open'] - today_hist['Close']).abs()
         recent_5_candles = today_hist.tail(5)
         selling_pressure_wicks = len(recent_5_candles[recent_5_candles['Upper_Wick'] > (recent_5_candles['Body'] * 1.5)])
         
-        # [신규] 거래량 가속도 (Volume Acceleration) 분석
-        # 본장 시작 전, 최근 3개봉(15분) 평균 거래량이 그 직전 3개봉(15분)보다 증가했는가?
         if len(today_hist) >= 6:
             recent_3_vol = today_hist['Volume'].tail(3).mean()
             prev_3_vol = today_hist['Volume'].iloc[-6:-3].mean()
-            if recent_3_vol > prev_3_vol * 1.2:  # 20% 이상 거래량 증가 추세
+            if recent_3_vol > prev_3_vol * 1.2:
                 vol_acceleration = True
     else:
         today_volume = 0
 
-    # 뉴스 스캐너
+    # 뉴스 분석
     news_items = ticker.news
     has_today_news = False
     news_sentiment = "NEUTRAL"
-    recent_news_titles = []
     current_time = time.time()
     
     for n in news_items:
         if current_time - n.get('providerPublishTime', 0) < 86400:
             has_today_news = True
-            title = n.get('title', '제목 없음')
-            recent_news_titles.append(title)
-            title_lower = title.lower()
+            title_lower = n.get('title', '').lower()
             if any(kw in title_lower for kw in BAD_KEYWORDS):
                 news_sentiment = "BAD"
             elif any(kw in title_lower for kw in GOOD_KEYWORDS) and news_sentiment != "BAD":
@@ -104,23 +99,24 @@ def get_stock_data(ticker_symbol):
 
     change_pct = ((current_price - prev_close) / prev_close * 100) if prev_close else 0
     turnover_rate = today_volume / float_shares if float_shares else 0
+    rvol = today_volume / avg_daily_volume if avg_daily_volume else 0
 
     return {
         'price': current_price, 'change': change_pct,
         'float': float_shares, 'pm_volume': today_volume,
-        'turnover': turnover_rate, 'vwap': vwap, 
+        'turnover': turnover_rate, 'rvol': rvol, 'vwap': vwap, 
         'has_news': has_today_news, 'news_sentiment': news_sentiment,
-        'news_titles': recent_news_titles[:2], 'pm_high': pm_high, 'pm_low': pm_low,
+        'pm_high': pm_high, 'pm_low': pm_low, 'short_pct': short_percent,
         'selling_wicks': selling_pressure_wicks, 'vol_acceleration': vol_acceleration
     }
 
 # --- [3] UI 렌더링 ---
-st.title("🚀 Gap & Go 스캘핑 타겟 판독기")
-st.markdown("<span style='font-size: 13px; color: #888;'>목적: 정규장 오픈 직후(9:30 AM) 20~30% 급등 모멘텀 포착</span>", unsafe_allow_html=True)
+st.title("🚀 정규장 오픈 직전 Gap & Go 판독기")
+st.markdown("<span style='font-size: 13px; color: #888;'>목적: 오전 9:30 본장 시작 직후 20~30% 단기 슈팅 포착</span>", unsafe_allow_html=True)
 target_ticker = st.text_input("프리마켓 급등 종목 입력 (예: FFIE, GME)", "FFIE").upper()
 
 if target_ticker:
-    with st.spinner("호가창 수급, 거래량 가속도, 유통주식수(Float) 교차 검증 중..."):
+    with st.spinner("호가창 제외(yfinance 딜레이 주의), 거래량 가속도 및 숏비율 교차 검증 중..."):
         data = get_stock_data(target_ticker)
         
     if data is None:
@@ -128,7 +124,6 @@ if target_ticker:
     else:
         st.markdown('<div class="card-container">', unsafe_allow_html=True)
         
-        # [헤더]
         col1, col2 = st.columns([6, 4])
         with col1:
             st.markdown(f"### {target_ticker}")
@@ -137,53 +132,46 @@ if target_ticker:
             st.markdown(f"<div style='text-align: right;'><span style='font-size: 28px; font-weight: bold;' class='{price_color}'>${data['price']:.2f}</span></div>", unsafe_allow_html=True)
             st.markdown(f"<div style='text-align: right; color: #888; font-size: 14px;'>당일 등락: {data['change']:.2f}%</div>", unsafe_allow_html=True)
         
-        # 🏷️ [동적 상태 태그 (Pill)]
+        # 🏷️ [동적 상태 태그]
         tags_html = ""
         
+        # 가격대 필터
+        if not (1 <= data['price'] <= 15):
+            tags_html += '<span class="pill-orange">⚠️ 스캘핑 권장 가격대 이탈 ($1~$15 밖)</span>'
+
         if data['has_news']: 
             if data['news_sentiment'] == "BAD": tags_html += '<span class="pill-red">🚨 악재(오퍼링 등) 감지</span>'
-            elif data['news_sentiment'] == "GOOD": tags_html += '<span class="pill-blue">📰 확실한 호재(FDA/계약 등)</span>'
-            else: tags_html += '<span class="pill-blue">📰 뉴스/공시 존재</span>'
-        else: 
-            tags_html += '<span class="pill-gray">무명분 펌핑 (위험)</span>'
-            
-        # Float 태그 (매우 중요)
-        if 0 < data['float'] <= 10_000_000:
-            tags_html += '<span class="pill-green">🚀 Micro-Float (품절주 펌핑 최적)</span>'
-        elif data['float'] > 30_000_000:
-            tags_html += '<span class="pill-orange">⚠️ 무거운 Float (탄력 저하)</span>'
-            
-        if data['vol_acceleration']: tags_html += '<span class="pill-green">🔥 오픈 임박 거래량 솟구침</span>'
-        if data['selling_wicks'] >= 2: tags_html += f'<span class="pill-red">📉 매도 윗꼬리 {data["selling_wicks"]}회 (물량 떠넘기기)</span>'
+            elif data['news_sentiment'] == "GOOD": tags_html += '<span class="pill-blue">📰 확실한 호재</span>'
+        
+        if 0 < data['float'] <= 10_000_000: tags_html += '<span class="pill-green">🚀 Micro-Float (품절주)</span>'
+        
+        # 신규 지표 태그
+        if data['rvol'] > 2: tags_html += f'<span class="pill-green">🔥 폭발적 상대거래량 ({data["rvol"]:.1f}x)</span>'
+        if data['short_pct'] > 15: tags_html += f'<span class="pill-orange">🎯 숏스퀴즈 가능성 (Short {data["short_pct"]:.1f}%)</span>'
+        if data['vol_acceleration']: tags_html += '<span class="pill-blue">📈 오픈 임박 거래량 솟구침</span>'
+        
+        dist_to_pmh = ((data['pm_high'] - data['price']) / data['price']) * 100
+        if dist_to_pmh <= 3: tags_html += '<span class="pill-green">⚔️ PMH(최고점) 돌파 직전</span>'
         
         st.markdown(tags_html, unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
         
         # 🎯 [모멘텀 스캘핑 데스 필터] 
         is_under_vwap = data['price'] < data['vwap']
-        is_low_pm_vol = data['pm_volume'] < 1_000_000 
         ideal_gap = 20 <= data['change'] <= 80
 
         if data['news_sentiment'] == "BAD":
             verdict_color = "#FF1744"; verdict_bg = "rgba(255, 23, 68, 0.15)"; status_badge = '<span class="badge-red">🔴 매매 절대 금지</span>'
-            verdict_title = "☠️ 악재 펌핑 (오퍼링/상폐 위험)"
-            verdict_desc = "본장 시작하자마자 패닉셀이 나올 확률이 99%입니다. 건드리지 마세요."
-        elif is_under_vwap and data['selling_wicks'] >= 2:
-            verdict_color = "#FF5252"; verdict_bg = "rgba(255, 82, 82, 0.15)"; status_badge = '<span class="badge-red">🔴 설거지 진행중</span>'
-            verdict_title = "🚨 가짜 펌핑 (Fade 주의)"
-            verdict_desc = "이미 세력이 물량을 털고 VWAP 아래로 밀렸습니다. 시가에 갭하락으로 시작할 수 있습니다."
-        elif data['change'] > 150:
-            verdict_color = "#FFB020"; verdict_bg = "rgba(255, 176, 32, 0.15)"; status_badge = '<span class="badge-orange">🟡 차익실현 빔 주의</span>'
-            verdict_title = "⚠️ 극단적 갭상승 (Fade 리스크)"
-            verdict_desc = "이미 150% 이상 상승했습니다. 본장 오픈 직후 거대한 차익실현 물량이 쏟아질 수 있으니 초반 5분은 관망하세요."
-        elif data['price'] >= data['vwap'] and data['vol_acceleration'] and ideal_gap:
-            verdict_color = "#4CAF50"; verdict_bg = "rgba(76, 175, 80, 0.15)"; status_badge = '<span class="badge-green">🔵 최적의 갭앤고 타겟</span>'
-            verdict_title = "🔥 A급 스캘핑 셋업 충족"
-            verdict_desc = "적당한 갭상승, VWAP 지지, 본장 임박 거래량 증가까지 완벽합니다. PMH 돌파 시 즉각적인 20% 수익이 가능합니다."
+            verdict_title, verdict_desc = "☠️ 악재 펌핑", "오픈하자마자 패닉셀이 나옵니다. 건드리지 마세요."
+        elif is_under_vwap and dist_to_pmh > 10:
+            verdict_color = "#FF5252"; verdict_bg = "rgba(255, 82, 82, 0.15)"; status_badge = '<span class="badge-red">🔴 추세 꺾임 (Fade)</span>'
+            verdict_title, verdict_desc = "🚨 세력 이탈 진행중", "PMH를 찍고 흘러내려 VWAP 아래에 있습니다. 장 시작 시 쏟아질 확률이 높습니다."
+        elif data['price'] >= data['vwap'] and dist_to_pmh <= 5 and ideal_gap and data['rvol'] > 1:
+            verdict_color = "#4CAF50"; verdict_bg = "rgba(76, 175, 80, 0.15)"; status_badge = '<span class="badge-green">🔵 최적의 타겟</span>'
+            verdict_title, verdict_desc = "🔥 A급 돌파 셋업", "PMH와 가깝고 거래량이 받쳐줍니다. 장 시작과 동시에 PMH 돌파 시 20% 상승 탄력이 붙습니다."
         else:
-            verdict_color = "#A0A0A0"; verdict_bg = "rgba(160, 160, 160, 0.15)"; status_badge = '<span class="badge-orange">🟡 조건 미달 (관망)</span>'
-            verdict_title = "🤔 애매함 (패스 권장)"
-            verdict_desc = "수급 가속도가 부족하거나 너무 무겁습니다. 확실한 셋업이 아니면 본장 초반 도박을 피하세요."
+            verdict_color = "#A0A0A0"; verdict_bg = "rgba(160, 160, 160, 0.15)"; status_badge = '<span class="badge-orange">🟡 애매함 (관망)</span>'
+            verdict_title, verdict_desc = "🤔 조건 미달", "수급이나 위치가 애매합니다. 9:30 직후 흔들기에 당할 수 있으니 패스하세요."
 
         st.markdown(f"""
         <div style="border: 2px solid {verdict_color}; background-color: {verdict_bg}; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
@@ -192,40 +180,36 @@ if target_ticker:
         </div>
         """, unsafe_allow_html=True)
         st.markdown(status_badge, unsafe_allow_html=True)
-            
         st.markdown("<hr style='border-color: #333;'>", unsafe_allow_html=True)
         
-        # 📊 [데이터 그리드 1] 급등 모멘텀 지표
-        float_display = f"{int(data['float']/1000000):,} M" if data['float'] > 0 else "N/A"
+        # 📊 [데이터 그리드]
+        float_display = f"{int(data['float']/1000000):,}M" if data['float'] > 0 else "N/A"
         
         g1_c1, g1_c2, g1_c3, g1_c4 = st.columns(4)
         with g1_c1:
-            st.markdown("<div class='metric-label'>프리마켓 거래량</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-val val-orange'>{int(data['pm_volume']/1000):,} K</div>", unsafe_allow_html=True)
+            st.markdown("<div class='metric-label'>RVOL (평소대비)</div>", unsafe_allow_html=True)
+            rvol_color = "val-green" if data['rvol'] >= 2 else "val-orange"
+            st.markdown(f"<div class='metric-val {rvol_color}'>{data['rvol']:.1f}x</div>", unsafe_allow_html=True)
         with g1_c2:
-            st.markdown("<div class='metric-label'>Float (유통주식)</div>", unsafe_allow_html=True)
-            f_color = "val-green" if (data['float'] > 0 and data['float'] <= 10000000) else "val-red"
-            st.markdown(f"<div class='metric-val {f_color}'>{float_display}</div>", unsafe_allow_html=True)
+            st.markdown("<div class='metric-label'>Float / 숏비율</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-val'>{float_display} / {data['short_pct']:.1f}%</div>", unsafe_allow_html=True)
         with g1_c3:
-            st.markdown("<div class='metric-label'>당일 갭(Gap) 상승률</div>", unsafe_allow_html=True)
-            gap_color = "val-green" if ideal_gap else "val-orange"
-            st.markdown(f"<div class='metric-val {gap_color}'>{data['change']:.1f}%</div>", unsafe_allow_html=True)
+            st.markdown("<div class='metric-label'>현재 Gap 상승률</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-val val-green'>{data['change']:.1f}%</div>", unsafe_allow_html=True)
         with g1_c4:
-            st.markdown("<div class='metric-label'>Float 회전율</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-val'>{'%.1f' % data['turnover'] if data['turnover'] else 'N/A'} 회</div>", unsafe_allow_html=True)
+            st.markdown("<div class='metric-label'>PMH까지 거리</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-val'>{dist_to_pmh:.1f}%</div>", unsafe_allow_html=True)
 
-        # 🛠️ [데이터 그리드 2] 모멘텀 트레이딩 실전 레벨
-        st.markdown("**스캘핑 기준 레벨 (본장 시작 후 즉각 대응용)**")
-
+        st.markdown("<br>**스캘핑 기준 레벨 (초단타 대응용)**", unsafe_allow_html=True)
         g2_c1, g2_c2, g2_c3 = st.columns(3)
         with g2_c1:
             st.markdown("<div class='metric-label'>생명선 (VWAP)</div>", unsafe_allow_html=True)
             st.markdown(f"<div class='metric-val' style='color:#2196F3;'>${data['vwap']:.2f}</div>", unsafe_allow_html=True)
         with g2_c2:
-            st.markdown("<div class='metric-label'>돌파 시 급등타겟 (PMH)</div>", unsafe_allow_html=True)
+            st.markdown("<div class='metric-label'>돌파 타겟 (PMH)</div>", unsafe_allow_html=True)
             st.markdown(f"<div class='metric-val val-green'>${data['pm_high']:.2f}</div>", unsafe_allow_html=True)
         with g2_c3:
-            st.markdown("<div class='metric-label'>최종 칼손절가 (PML)</div>", unsafe_allow_html=True)
+            st.markdown("<div class='metric-label'>칼손절가 (PML)</div>", unsafe_allow_html=True)
             st.markdown(f"<div class='metric-val val-red'>${data['pm_low']:.2f}</div>", unsafe_allow_html=True)
 
         st.markdown('</div>', unsafe_allow_html=True)
