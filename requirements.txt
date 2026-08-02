@@ -1,7 +1,8 @@
 streamlit
-git+https://github.com/mraniki/tvDatafeed.git
+tvdatafeed
 pandas
 numpy
 plotly
+
 
 
