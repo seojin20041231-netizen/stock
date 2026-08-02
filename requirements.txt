@@ -1,8 +1,10 @@
 streamlit
-tvdatafeed
 pandas
 numpy
 plotly
+websocket-client
+tvDatafeed @ git+https://github.com/mraniki/tvDatafeed.git
+
 
 
 
