@@ -4,19 +4,19 @@ import pandas as pd
 import numpy as np
 
 # --- [1] 기본 설정 ---
-st.set_page_config(page_title="프리마켓 몬스터 스캐너 (덤핑 방어 필터 장착)", layout="wide")
+st.set_page_config(page_title="프리마켓 몬스터 스캐너 (100점 만점 리포트)", layout="wide")
 
 st.markdown("""
 <style>
     .stApp { background-color: #121212; color: #FFFFFF; }
     .card-container { background-color: #1E1E1E; padding: 22px; border-radius: 12px; border: 1px solid #333; margin-bottom: 20px; }
-    .metric-label { font-size: 12px; color: #888888; margin-bottom: 2px;}
-    .metric-val { font-size: 15px; font-weight: bold; }
-    .val-green { color: #4CAF50; }
-    .val-red { color: #FF5252; }
-    .val-blue { color: #2196F3; }
-    .val-orange { color: #FFB020; }
-    .val-purple { color: #E040FB; }
+    .score-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    .score-table th, .score-table td { border: 1px solid #444; padding: 10px; text-align: left; }
+    .score-table th { background-color: #2D2D2D; color: #aaa; }
+    .val-green { color: #4CAF50; font-weight: bold;}
+    .val-red { color: #FF5252; font-weight: bold;}
+    .val-blue { color: #2196F3; font-weight: bold;}
+    .val-yellow { color: #FFB020; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -33,33 +33,35 @@ def calculate_bollinger_bands(data, window=20, num_std=2):
     rolling_std = data.rolling(window=window).std()
     return rolling_mean + (rolling_std * num_std), rolling_mean - (rolling_std * num_std)
 
-# --- [3] 메인 데이터 분석 엔진 ---
+# --- [3] 메인 데이터 분석 엔진 (100점 만점 스코어링) ---
 @st.cache_data(ttl=60)
 def analyze_ticker_ultimate(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
+        score_details = []
+        total_score = 0
         
-        # 1. 과거 1년 일봉 (종목 DNA 검사 용도)
+        # 1. 일봉 데이터 (DNA 및 매물대 분석)
         df_daily = ticker.history(period="1y", interval="1d")
-        if len(df_daily) < 2:
-            return {"error": f"[{ticker_symbol}] 일봉 데이터 부족"}
         
-        # 👑 [필터 1] 악질 덤핑 DNA 검사 (과거 10% 이상 갭 뜬 날의 승률)
         df_daily['Prev_Close'] = df_daily['Close'].shift(1)
         df_daily['Gap_Pct'] = (df_daily['Open'] - df_daily['Prev_Close']) / df_daily['Prev_Close'] * 100
         gap_days = df_daily[df_daily['Gap_Pct'] >= 10.0]
         
         if len(gap_days) > 0:
-            # 갭 뜬 날, 시가보다 종가가 높게 끝난(양봉) 확률
             win_days = gap_days[gap_days['Close'] > gap_days['Open']]
             gap_win_rate = (len(win_days) / len(gap_days)) * 100
             total_gaps = len(gap_days)
         else:
-            gap_win_rate = 50.0  # 기록이 없으면 중립
+            gap_win_rate = None 
             total_gaps = 0
 
+        df_daily['SMA50'] = df_daily['Close'].rolling(window=50, min_periods=10).mean()
+        df_daily['SMA200'] = df_daily['Close'].rolling(window=200, min_periods=50).mean()
+        
         yest_close = df_daily['Close'].iloc[-1]
+        sma200 = df_daily['SMA200'].iloc[-1] if not pd.isna(df_daily['SMA200'].iloc[-1]) else 0
         adv_10 = df_daily['Volume'].tail(10).mean()
 
         # 2. 1분봉 데이터 (프리마켓)
@@ -70,88 +72,144 @@ def analyze_ticker_ultimate(ticker_symbol):
         current_price = df_1m['Close'].iloc[-1]
         today_volume = df_1m['Volume'].sum()
         pm_high = df_1m['High'].max()
-        pm_low = df_1m['Low'].min()
-        
-        # 👑 [필터 2] 진짜 꽂힌 돈 (거래 대금)
         dollar_volume = current_price * today_volume
         
-        # 👑 [필터 3] 프리마켓 저점 갱신 방어 (Higher Lows) 검사
         higher_lows = False
         if len(df_1m) >= 30:
             chunks = np.array_split(df_1m, 3)
-            low_1 = chunks[0]['Low'].min()
-            low_2 = chunks[1]['Low'].min()
-            low_3 = chunks[2]['Low'].min()
-            # 시간이 지날수록 저점이 높아지는가?
-            if (low_3 > low_2) and (low_2 >= low_1):
+            if (chunks[2]['Low'].min() > chunks[1]['Low'].min()) and (chunks[1]['Low'].min() >= chunks[0]['Low'].min()):
                 higher_lows = True
 
-        # 기본 지표 계산
+        recent_60m_vol = df_1m['Volume'].tail(60).sum()
+        vol_concentration = (recent_60m_vol / today_volume * 100) if today_volume > 0 else 0
+
+        df_5m = df_1m.resample('5min').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+        is_above_5m_ema = False
+        if len(df_5m) >= 20:
+            df_5m['EMA20'] = df_5m['Close'].ewm(span=20, adjust=False).mean()
+            is_above_5m_ema = current_price > df_5m['EMA20'].iloc[-1]
+
         gap_pct = ((current_price - yest_close) / yest_close) * 100
         rvol = (today_volume / adv_10) * 100 if adv_10 > 0 else 0
-        dist_to_pmh = ((pm_high - current_price) / current_price) * 100
+        dist_to_sma200 = ((sma200 - current_price) / current_price) * 100 if sma200 > 0 else 999
         
-        # VWAP, RSI, BB 계산
         tp = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
         cum_v = df_1m['Volume'].cumsum()
         vwap = ((tp * df_1m['Volume']).cumsum() / np.where(cum_v == 0, 1, cum_v)).iloc[-1]
         
-        df_1m['RSI'] = calculate_rsi(df_1m['Close'])
-        df_1m['BB_Upper'], _ = calculate_bollinger_bands(df_1m['Close'])
-        current_rsi = df_1m['RSI'].iloc[-1]
-        bb_upper = df_1m['BB_Upper'].iloc[-1]
-        
         float_shares = info.get('floatShares', 0)
         short_pct = info.get('shortPercentOfFloat', 0) * 100 if info.get('shortPercentOfFloat') else 0
+        has_news = len(ticker.news) > 0
 
-        # --- 🎯 [스코어링 로직: 덤핑 방어 특화] ---
-        score = 0
+        # --- 🎯 [100점 만점 스코어링 로직 & 분석 리포트 생성] ---
         
-        # 가점 영역
-        if current_price >= vwap: score += 20             
-        if gap_pct >= 10: score += 15                     
-        if rvol >= 100: score += 10                       
-        if dist_to_pmh <= 2.5: score += 15                
-        if 0 < float_shares <= 20_000_000: score += 15    
-        if short_pct >= 15: score += 10                   
-        
-        # 🔥 추가 가점 (진짜 대장주 요건)
-        if dollar_volume >= 5_000_000: score += 20        # 500만불(65억) 이상 찐돈 유입
-        if higher_lows: score += 20                       # 장전 내내 저점 높임 (덤핑 방어 패턴)
-        if gap_win_rate >= 50 and total_gaps >= 3: score += 15 # 과거 갭 뜰 때마다 날아간 착한 DNA
+        # [카테고리 1: 수급 및 거래대금 - 최대 30점]
+        if dollar_volume >= 5_000_000:
+            total_score += 15
+            score_details.append({"cat":"수급 (15점)","item": "실거래 대금", "score": "15 / 15", "reason": f"${dollar_volume/1000000:.1f}M 유입. 세력의 '진짜 돈'이 들어온 것으로 판단됨."})
+        elif dollar_volume >= 1_000_000:
+            total_score += 5
+            score_details.append({"cat":"수급 (15점)","item": "실거래 대금", "score": "5 / 15", "reason": f"${dollar_volume/1000000:.1f}M 유입. 거래대금은 발생했으나 S급 돌파를 위해선 부족함."})
+        else:
+            score_details.append({"cat":"수급 (15점)","item": "실거래 대금", "score": "0 / 15", "reason": "거래대금 100만불 미만. 호가창이 얇아 세력의 틱 장난일 확률이 99%임."})
 
-        # ☠️ 치명적 감점 (가짜 펌핑 거르기)
-        if gap_win_rate < 20 and total_gaps >= 3: score -= 40  # 악질 유상증자/덤핑 상습범
-        if dollar_volume < 1_000_000: score -= 30              # 100만불도 안 되는 깃털 호가창
+        if vol_concentration >= 40:
+            total_score += 10
+            score_details.append({"cat":"수급 (10점)","item": "거래량 집중도", "score": "10 / 10", "reason": f"최근 1시간 내 거래량이 {vol_concentration:.1f}% 집중됨. 본장 직전 매수세가 살아있음."})
+        else:
+            score_details.append({"cat":"수급 (10점)","item": "거래량 집중도", "score": "0 / 10", "reason": f"최근 1시간 거래 비중이 {vol_concentration:.1f}%에 불과. 새벽 반짝 상승 후 소외되고 있음."})
+
+        if rvol >= 100:
+            total_score += 5
+            score_details.append({"cat":"수급 (5점)","item": "상대 거래량(RVOL)", "score": "5 / 5", "reason": "최근 10일 평균 거래량을 이미 돌파하며 시장의 이목이 집중됨."})
+        else:
+            score_details.append({"cat":"수급 (5점)","item": "상대 거래량(RVOL)", "score": "0 / 5", "reason": "평소와 비교해 유의미한 거래량 폭발이 관찰되지 않음."})
+
+        # [카테고리 2: 단기 차트 및 추세 - 최대 30점]
+        if current_price >= vwap:
+            total_score += 10
+            score_details.append({"cat":"추세 (10점)","item": "VWAP (생명선) 지지", "score": "10 / 10", "reason": "당일 평균 매수 단가(VWAP) 위에서 가격을 굳건히 방어 중."})
+        else:
+            score_details.append({"cat":"추세 (10점)","item": "VWAP (생명선) 지지", "score": "0 / 10", "reason": "VWAP 아래로 뚫림. 당일 매수자들 대부분이 손실 구간이라 투매 위험 높음."})
+
+        if is_above_5m_ema:
+            total_score += 10
+            score_details.append({"cat":"추세 (10점)","item": "5분봉 20EMA 지지", "score": "10 / 10", "reason": "5분봉 기준 단기 이동평균선을 타며 안정적인 상승 추세 유지 중."})
+        else:
+            score_details.append({"cat":"추세 (10점)","item": "5분봉 20EMA 지지", "score": "0 / 10", "reason": "단기 지지선 이탈. 수급이 꼬이면서 하방 압력이 거세지고 있음."})
+
+        if higher_lows:
+            total_score += 10
+            score_details.append({"cat":"추세 (10점)","item": "프리마켓 저점 갱신", "score": "10 / 10", "reason": "장전 내내 저점을 계단식으로 높이며 악성 물량을 소화하는 긍정적 패턴."})
+        else:
+            score_details.append({"cat":"추세 (10점)","item": "프리마켓 저점 갱신", "score": "0 / 10", "reason": "저점이 낮아지거나 횡보 중. 누군가 지속적으로 덤핑(매도)하고 있음."})
+
+        # [카테고리 3: 악질 DNA 및 매물대 - 최대 20점]
+        if gap_win_rate is None:
+            total_score += 10
+            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "10 / 10", "reason": "최근 1년 내 10% 이상 갭상승 이력 없음 (악성 덤핑 데이터가 없어 중립적 호재)."})
+        elif gap_win_rate >= 50 and total_gaps >= 3:
+            total_score += 10
+            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "10 / 10", "reason": f"과거 {total_gaps}번 갭 상승 시 {gap_win_rate:.1f}% 확률로 양봉 마감. 상승을 잘 지키는 착한 종목."})
+        elif gap_win_rate < 20 and total_gaps >= 3:
+            # 치명적 악질 DNA 감점 반영
+            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "0 / 10", "reason": f"🚨 [경고] 과거 갭 띄우고 내리꽂은 확률 {100-gap_win_rate:.1f}%. 상습 덤핑 종목이라 신뢰도 최악."})
+        else:
+            total_score += 5
+            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "5 / 10", "reason": f"과거 승률 {gap_win_rate:.1f}%. 애매한 기록이므로 본장 시작 후 방향성 확인 필수."})
+
+        if 0 < dist_to_sma200 <= 5.0:
+            score_details.append({"cat":"매물대 (10점)","item": "장기 이평선(200SMA)", "score": "0 / 10", "reason": f"현재가 바로 위({dist_to_sma200:.1f}%)에 200일선 위치. 과거 물린 개미들의 거대한 매도 폭탄이 대기 중."})
+        else:
+            total_score += 10
+            reason_txt = "이미 200일선을 강하게 돌파했거나, 저항선이 멀리 있어 상방이 열려있음." if dist_to_sma200 < 0 else "장기 저항선과의 간섭이 적은 안전 구간."
+            score_details.append({"cat":"매물대 (10점)","item": "장기 이평선(200SMA)", "score": "10 / 10", "reason": reason_txt})
+
+        # [카테고리 4: 재료 및 숏스퀴즈 조건 - 최대 20점]
+        if has_news:
+            total_score += 10
+            score_details.append({"cat":"재료 (10점)","item": "개별 호재(뉴스)", "score": "10 / 10", "reason": "오늘 펌핑을 정당화할 명확한 뉴스가 존재하여 시장의 매수세가 붙기 좋음."})
+        else:
+            score_details.append({"cat":"재료 (10점)","item": "개별 호재(뉴스)", "score": "0 / 10", "reason": "아무 뉴스 없이 오름. 세력의 장난이나 단순 숏커버링으로, 정규장에서 유지가 힘듦."})
+
+        squeeze_score = 0
+        sq_reasons = []
+        if 0 < float_shares <= 20_000_000:
+            squeeze_score += 5
+            sq_reasons.append(f"품절주(Float {float_shares/1_000_000:.1f}M)")
+        if short_pct >= 15:
+            squeeze_score += 5
+            sq_reasons.append(f"공매도 잔고 높음({short_pct:.1f}%)")
         
-        # 최종 등급 판정
-        if score >= 110 and current_price >= vwap: tier = "👑 찐대장 (상킷 타겟)"
-        elif score >= 80 and current_price >= vwap: tier = "🔥 S급 (수급 양호)"
-        elif score >= 50: tier = "🎯 A급 (감시망)"
-        elif score < 30 or current_price < (vwap * 0.98): tier = "☠️ F급 (설거지 주의)"
-        else: tier = "🟡 B급 (관망)"
+        total_score += squeeze_score
+        sq_reason_text = " + ".join(sq_reasons) + " -> 숏스퀴즈 및 가벼운 슈팅 가능성 높음." if squeeze_score > 0 else "유통 주식이 너무 무겁거나 스퀴즈 모멘텀이 부족함."
+        score_details.append({"cat":"가벼움 (10점)","item": "품절주 & 공매도", "score": f"{squeeze_score} / 10", "reason": sq_reason_text})
+
+        # 최종 등급 판정 (0 ~ 100점 만점)
+        if total_score >= 85: tier = "👑 찐대장 (상킷 타겟)"
+        elif total_score >= 70: tier = "🔥 S급 (수급 양호)"
+        elif total_score >= 50: tier = "🎯 A급 (감시망)"
+        elif total_score >= 35: tier = "🟡 B급 (관망)"
+        else: tier = "☠️ F급 (설거지 주의)"
 
         return {
             'ticker': ticker_symbol, 'price': current_price, 'gap': gap_pct,
-            'volume': today_volume, 'dollar_vol': dollar_volume, 'rvol': rvol, 'vwap': vwap, 
-            'pm_high': pm_high, 'pm_low': pm_low, 'dist_pmh': dist_to_pmh, 
-            'rsi': current_rsi, 'bb_up': bb_upper, 'higher_lows': higher_lows,
-            'gap_win_rate': gap_win_rate, 'total_gaps': total_gaps,
-            'float': float_shares, 'short': short_pct, 'score': score, 'tier': tier
+            'dollar_vol': dollar_volume, 'vwap': vwap, 'score': total_score, 'tier': tier,
+            'details': score_details
         }
     except Exception as e:
-        return {"error": f"[{ticker_symbol}] 데이터 수집 에러 (존재하지 않거나 거래 없음)"}
+        return {"error": f"[{ticker_symbol}] 분석 중 오류: {str(e)}"}
 
 # --- [4] UI 화면 구성 ---
-st.title("🛡️ 프리마켓 찐대장 판독기 (DUMP 필터링)")
-st.markdown("가짜 펌핑(Pump & Dump)을 걸러내고 상방 서킷(LULD)을 노리는 동전주 특화 스캐너입니다.")
+st.title("🛡️ 100점 만점 프리마켓 정밀 판독기")
+st.markdown("수급, 추세, DNA, 재료를 100점 만점으로 환산하여 오를 수밖에 없는 이유와 덤핑 징후를 정확히 짚어줍니다.")
 st.markdown("---")
 
 input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", "GME, AMC, FFIE, HOLO, CRKN")
 ticker_list = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
 
 if ticker_list:
-    with st.spinner("과거 1년 치 악질 DNA와 거래 대금을 정밀 추적 중..."):
+    with st.spinner("종목별 100점 만점 채점 및 이유 분석 중..."):
         results, errors = [], []
         for t in ticker_list:
             res = analyze_ticker_ultimate(t)
@@ -164,65 +222,43 @@ if ticker_list:
     if results:
         df_res = pd.DataFrame(results).sort_values(by="score", ascending=False).reset_index(drop=True)
 
-        st.subheader("🏆 실시간 타점 & 설거지 방어 랭킹")
+        st.subheader("🏆 종합 점수 랭킹")
         st.dataframe(
-            df_res[['ticker', 'tier', 'score', 'price', 'gap', 'dollar_vol', 'gap_win_rate']].style.format({
-                'price': '${:.2f}', 'gap': '{:+.2f}%', 'dollar_vol': '${:,.0f}', 'gap_win_rate': '{:.1f}%'
+            df_res[['ticker', 'tier', 'score', 'price', 'gap', 'dollar_vol']].style.format({
+                'price': '${:.2f}', 'gap': '{:+.2f}%', 'dollar_vol': '${:,.0f}'
             }), 
             use_container_width=True, hide_index=True
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.subheader("🔬 종목 정밀 엑스레이 (X-Ray)")
-        selected_ticker = st.selectbox("심층 해부할 종목 선택", df_res['ticker'].tolist())
+        st.subheader("🔬 100점 만점 상세 채점표 (X-Ray Report)")
+        selected_ticker = st.selectbox("분석 리포트를 볼 종목 선택", df_res['ticker'].tolist())
         data = next(item for item in results if item['ticker'] == selected_ticker)
         
         st.markdown('<div class="card-container">', unsafe_allow_html=True)
         
-        c1, c2 = st.columns([6, 4])
+        c1, c2 = st.columns([7, 3])
         with c1:
             st.markdown(f"## {data['ticker']} <span style='font-size:18px;'>({data['tier']})</span>", unsafe_allow_html=True)
         with c2:
-            p_color = "val-green" if data['gap'] >= 0 else "val-red"
-            st.markdown(f"<div style='text-align: right;'><span class='{p_color}' style='font-size: 32px; font-weight: bold;'>${data['price']:.2f}</span></div>", unsafe_allow_html=True)
+            score_color = "val-green" if data['score'] >= 70 else ("val-yellow" if data['score'] >= 50 else "val-red")
+            st.markdown(f"<div style='text-align: right;'><span style='font-size: 16px; color: #888;'>종합 점수</span><br><span class='{score_color}' style='font-size: 38px;'>{data['score']} / 100</span></div>", unsafe_allow_html=True)
         
-        tab1, tab2, tab3 = st.tabs(["💰 거래대금 & 수급", "🛡️ 덤핑 방어력 (DNA)", "⚙️ 기준선 & 스퀴즈"])
+        # 상세 채점표 HTML 렌더링
+        html_table = "<table class='score-table'><thead><tr><th style='width:15%'>카테고리</th><th style='width:20%'>평가 항목</th><th style='width:10%'>획득 점수</th><th style='width:55%'>분석 이유 (Rationale)</th></tr></thead><tbody>"
         
-        with tab1:
-            st.markdown("### 진짜 돈이 들어왔는가?")
-            d_vol_str = f"${data['dollar_vol']/1_000_000:.1f}M (백만 달러)"
-            st.markdown(f"**실 거래대금:** <span class='val-green'>{d_vol_str}</span>", unsafe_allow_html=True)
-            if data['dollar_vol'] < 1_000_000:
-                st.error("🚨 경고: 거래대금이 100만 달러 미만입니다. 세력의 호가창 장난일 확률이 99%입니다.")
-            elif data['dollar_vol'] >= 5_000_000:
-                st.success("🔥 500만 달러 이상 찐돈 유입! 상방 모멘텀이 매우 강력합니다.")
-            
-            st.markdown(f"**RVOL (상대 거래량):** {data['rvol']:.1f}%")
-
-        with tab2:
-            st.markdown("### 본장에서 내리꽂을 놈인가?")
-            
-            # DNA 검사 결과
-            if data['total_gaps'] > 0:
-                dna_color = "val-red" if data['gap_win_rate'] < 30 else ("val-green" if data['gap_win_rate'] > 50 else "")
-                st.markdown(f"**과거 갭상승 승률:** <span class='{dna_color}'>{data['gap_win_rate']:.1f}%</span> (총 {data['total_gaps']}번의 갭상승 중 양봉 마감 비율)", unsafe_allow_html=True)
-                if data['gap_win_rate'] < 20 and data['total_gaps'] >= 3:
-                    st.error("☠️ 악질 DNA: 이 종목은 과거 갭만 띄우고 본장에서 내다 꽂은 전적이 화려합니다. 절대 매수 금지.")
+        for item in data['details']:
+            # 점수에 따른 색상 하이라이트
+            if item['score'].startswith('0'):
+                sc_html = f"<span class='val-red'>{item['score']}</span>"
+            elif float(item['score'].split('/')[0].strip()) == float(item['score'].split('/')[1].strip()):
+                sc_html = f"<span class='val-green'>{item['score']}</span>"
             else:
-                st.markdown("**과거 갭상승 승률:** 최근 1년간 10% 이상 갭 뜬 이력이 없습니다.")
-
-            # 계단식 저점 방어
-            st.markdown(f"**프리마켓 저점 지지 여부:** {'✅ 강력 (저점 높이는 중)' if data['higher_lows'] else '❌ 취약 (저점이 깨지거나 횡보)'}")
-            if data['higher_lows']:
-                st.info("장전 내내 누군가 물량을 받으며 저점을 끌어올리는 '덤핑 방어 패턴'이 확인되었습니다.")
-
-        with tab3:
-            st.markdown(f"**VWAP (생명선):** <span class='val-blue'>${data['vwap']:.2f}</span>", unsafe_allow_html=True)
-            st.markdown(f"**PMH (전고점 거리):** {data['dist_pmh']:.1f}% 남음")
+                sc_html = f"<span class='val-blue'>{item['score']}</span>"
+                
+            html_table += f"<tr><td><b>{item['cat']}</b></td><td>{item['item']}</td><td>{sc_html}</td><td>{item['reason']}</td></tr>"
             
-            f_str = f"{data['float']/1_000_000:.1f}M" if data['float'] > 0 else "N/A"
-            s_str = f"{data['short']:.1f}%" if data['short'] > 0 else "N/A"
-            st.markdown(f"**유통주식수 (Float):** {f_str}")
-            st.markdown(f"**공매도 잔고 (Short):** {s_str}")
-
+        html_table += "</tbody></table>"
+        
+        st.markdown(html_table, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
