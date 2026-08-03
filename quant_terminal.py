@@ -2,8 +2,12 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+import time
 
-# --- [1] 기본 설정 ---
+# --- [1] 기본 설정 및 API 키 ---
+FINNHUB_API_KEY = "d9nksmpr01qvumganiogd9nksmpr01qvumganip0"
+
 st.set_page_config(page_title="프리마켓 몬스터 스캐너 (최종 종결판)", layout="wide")
 
 st.markdown("""
@@ -20,7 +24,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- [2] 메인 데이터 분석 엔진 (최종 100점 만점 / 에러 픽스 버전) ---
+# --- [2] 메인 데이터 분석 엔진 (Finnhub + YF 듀얼 엔진) ---
 @st.cache_data(ttl=60)
 def analyze_ticker_ultimate(ticker_symbol):
     try:
@@ -59,23 +63,56 @@ def analyze_ticker_ultimate(ticker_symbol):
         adv_10 = df_daily['Volume'].tail(10).mean()
 
         # ------------------------------------------------
-        # 2. 1분봉 데이터 (피보나치, VWAP, 수급 디테일)
+        # 2. 1분봉 데이터 (Finnhub API 적용 구간)
         # ------------------------------------------------
-        df_1m = ticker.history(period="1d", interval="1m", prepost=True)
-        if df_1m.empty:
-            return {"error": f"[{ticker_symbol}] 당일 1분봉 데이터가 없습니다"}
+        df_1m = pd.DataFrame()
+        end_time = int(time.time())
+        start_time = end_time - (86400 * 3) # 주말을 고려해 최근 3일치 스캔
+        
+        fh_url = f"https://finnhub.io/api/v1/stock/candle?symbol={ticker_symbol}&resolution=1&from={start_time}&to={end_time}&token={FINNHUB_API_KEY}"
+        
+        try:
+            r = requests.get(fh_url, timeout=5)
+            fh_data = r.json()
+            # 핀허브 데이터가 정상적으로 들어왔을 때만 적용
+            if fh_data.get('s') == 'ok':
+                df_1m = pd.DataFrame({
+                    'Close': fh_data['c'],
+                    'High': fh_data['h'],
+                    'Low': fh_data['l'],
+                    'Open': fh_data['o'],
+                    'Volume': fh_data['v']
+                })
+        except Exception:
+            pass # 핀허브 타임아웃 발생 시 무시하고 아래 YF로 넘어감
 
+        # 핀허브 데이터가 비어있다면 기존 야후 파이낸스로 백업 호출
+        if df_1m.empty:
+            df_1m = ticker.history(period="1d", interval="1m", prepost=True)
+            if df_1m.empty:
+                return {"error": f"[{ticker_symbol}] 당일 1분봉 데이터가 없습니다 (데이터 제공사 응답 없음)"}
+
+        # 각종 분봉 기반 지표 계산
         current_price = df_1m['Close'].iloc[-1]
-        today_volume = df_1m['Volume'].sum()
-        dollar_volume = current_price * today_volume
         pm_high = df_1m['High'].max()
         pm_low = df_1m['Low'].min()
 
+        # 수급 데이터 (핀허브 IEX 누락 대비 3중 방어막 적용)
+        vol_1m_sum = df_1m['Volume'].sum()
+        vol_daily = df_daily['Volume'].iloc[-1] if not pd.isna(df_daily['Volume'].iloc[-1]) else 0
+        vol_info = info.get('volume', 0)
+        
+        today_volume = max(vol_1m_sum, vol_daily, vol_info)
+        if today_volume <= 0: today_volume = 1 
+            
+        dollar_volume = current_price * today_volume
+
+        # 피보나치 방어선 계산
         fib_range = pm_high - pm_low
         fib_382 = pm_high - (fib_range * 0.382)
         fib_618 = pm_high - (fib_range * 0.618)
 
-        # 🚨 [수정된 부분 1] numpy.array_split 대신 Pandas 기본 슬라이싱(iloc) 사용
+        # 계단식 저점 방어 (Pandas 슬라이싱)
         higher_lows = False
         if len(df_1m) >= 30:
             chunk_size = len(df_1m) // 3
@@ -86,11 +123,10 @@ def analyze_ticker_ultimate(ticker_symbol):
             if (c3_low > c2_low) and (c2_low >= c1_low):
                 higher_lows = True
 
-        # 거래량 집중도
+        # 거래량 집중도 및 VWAP
         recent_60m_vol = df_1m['Volume'].tail(60).sum()
         vol_concentration = (recent_60m_vol / today_volume * 100) if today_volume > 0 else 0
         
-        # 🚨 [수정된 부분 2] numpy.where 대신 Pandas replace(0, 1) 사용
         tp = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
         cum_v = df_1m['Volume'].cumsum()
         vwap = ((tp * df_1m['Volume']).cumsum() / cum_v.replace(0, 1)).iloc[-1]
@@ -214,7 +250,6 @@ def analyze_ticker_ultimate(ticker_symbol):
             'details': score_details
         }
     except Exception as e:
-        # 에러 메시지 상세 출력 (디버깅 용도)
         return {"error": f"[{ticker_symbol}] 분석 중 오류 발생: {str(e)}"}
 
 # --- [3] UI 화면 구성 ---
@@ -222,12 +257,11 @@ st.title("🛡️ 100점 만점 프리마켓 정밀 판독기 (Final Edition)")
 st.markdown("차트 갭, 피보나치 방어선, 그리고 현금 고갈(유상증자) 리스크까지 모두 통과한 진짜 몬스터만 선별합니다.")
 st.markdown("---")
 
-# 기본 입력값을 비워두도록 수정 ("" 사용)
 input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", "")
 ticker_list = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
 
 if ticker_list:
-    with st.spinner("알고리즘 봇 수준의 정밀 스캐닝 중 (매물대/피보나치/유증 리스크 체크)..."):
+    with st.spinner("알고리즘 봇 수준의 정밀 스캐닝 중 (Finnhub API 연동 중)..."):
         results, errors = [], []
         for t in ticker_list:
             res = analyze_ticker_ultimate(t)
@@ -262,7 +296,6 @@ if ticker_list:
             score_color = "val-green" if data['score'] >= 70 else ("val-yellow" if data['score'] >= 50 else "val-red")
             st.markdown(f"<div style='text-align: right;'><span style='font-size: 16px; color: #888;'>완벽 분석 점수</span><br><span class='{score_color}' style='font-size: 38px;'>{data['score']} / 100</span></div>", unsafe_allow_html=True)
         
-        # 상세 채점표 HTML 렌더링
         html_table = "<table class='score-table'><thead><tr><th style='width:15%'>카테고리</th><th style='width:20%'>평가 항목</th><th style='width:12%'>점수</th><th style='width:53%'>분석 근거 (Rationale)</th></tr></thead><tbody>"
         
         for item in data['details']:
