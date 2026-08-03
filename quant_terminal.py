@@ -20,7 +20,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- [2] 메인 데이터 분석 엔진 (최종 100점 만점) ---
+# --- [2] 메인 데이터 분석 엔진 (최종 100점 만점 / 에러 픽스 버전) ---
 @st.cache_data(ttl=60)
 def analyze_ticker_ultimate(ticker_symbol):
     try:
@@ -34,10 +34,8 @@ def analyze_ticker_ultimate(ticker_symbol):
         # ------------------------------------------------
         df_daily = ticker.history(period="1y", interval="1d")
         if len(df_daily) < 2:
-            return {"error": f"[{ticker_symbol}] 일봉 데이터 부족"}
+            return {"error": f"[{ticker_symbol}] 일봉 데이터가 부족합니다 (신규 상장 또는 거래 정지 가능성)"}
 
-        # 👑 [신규 디테일 1] 갇힌 갭 vs 열린 갭 (YDT High 돌파 여부)
-        # 마지막 행은 현재(오늘) 데이터일 수 있으므로 shift(1)을 통해 정확한 전일 종가/고점 추출
         df_daily['Prev_Close'] = df_daily['Close'].shift(1)
         df_daily['Prev_High'] = df_daily['High'].shift(1)
         
@@ -65,7 +63,7 @@ def analyze_ticker_ultimate(ticker_symbol):
         # ------------------------------------------------
         df_1m = ticker.history(period="1d", interval="1m", prepost=True)
         if df_1m.empty:
-            return {"error": f"[{ticker_symbol}] 당일 분봉 데이터 없음"}
+            return {"error": f"[{ticker_symbol}] 당일 1분봉 데이터가 없습니다"}
 
         current_price = df_1m['Close'].iloc[-1]
         today_volume = df_1m['Volume'].sum()
@@ -73,24 +71,29 @@ def analyze_ticker_ultimate(ticker_symbol):
         pm_high = df_1m['High'].max()
         pm_low = df_1m['Low'].min()
 
-        # 👑 [신규 디테일 2] 피보나치 0.618 방어선 계산 (Dead Cat 필터)
         fib_range = pm_high - pm_low
         fib_382 = pm_high - (fib_range * 0.382)
         fib_618 = pm_high - (fib_range * 0.618)
 
-        # 저점 갱신 방어
+        # 🚨 [수정된 부분 1] numpy.array_split 대신 Pandas 기본 슬라이싱(iloc) 사용
         higher_lows = False
         if len(df_1m) >= 30:
-            chunks = np.array_split(df_1m, 3)
-            if (chunks[2]['Low'].min() > chunks[1]['Low'].min()) and (chunks[1]['Low'].min() >= chunks[0]['Low'].min()):
+            chunk_size = len(df_1m) // 3
+            c1_low = df_1m['Low'].iloc[:chunk_size].min()
+            c2_low = df_1m['Low'].iloc[chunk_size:chunk_size*2].min()
+            c3_low = df_1m['Low'].iloc[chunk_size*2:].min()
+            
+            if (c3_low > c2_low) and (c2_low >= c1_low):
                 higher_lows = True
 
-        # 거래량 집중도 & VWAP
+        # 거래량 집중도
         recent_60m_vol = df_1m['Volume'].tail(60).sum()
         vol_concentration = (recent_60m_vol / today_volume * 100) if today_volume > 0 else 0
+        
+        # 🚨 [수정된 부분 2] numpy.where 대신 Pandas replace(0, 1) 사용
         tp = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
         cum_v = df_1m['Volume'].cumsum()
-        vwap = ((tp * df_1m['Volume']).cumsum() / np.where(cum_v == 0, 1, cum_v)).iloc[-1]
+        vwap = ((tp * df_1m['Volume']).cumsum() / cum_v.replace(0, 1)).iloc[-1]
         
         gap_pct = ((current_price - yest_close) / yest_close) * 100
         rvol = (today_volume / adv_10) * 100 if adv_10 > 0 else 0
@@ -103,7 +106,6 @@ def analyze_ticker_ultimate(ticker_symbol):
         short_pct = info.get('shortPercentOfFloat', 0) * 100 if info.get('shortPercentOfFloat') else 0
         has_news = len(ticker.news) > 0
         
-        # 👑 [신규 디테일 3] 보유 현금 기반 유증 리스크 (Cash Runway)
         total_cash = info.get('totalCash', 0)
         market_cap = info.get('marketCap', 1)
         cash_ratio = total_cash / market_cap if market_cap > 0 else 0
@@ -179,16 +181,16 @@ def analyze_ticker_ultimate(ticker_symbol):
             total_score += 10
             score_details.append({"cat":"매물대 (10점)","item": "장기 저항선 (200 SMA)", "score": "10 / 10", "reason": "200일선을 완벽히 뚫어냈거나, 매물대가 멀리 있어 안전함."})
 
-        # [카테고리 4: 펀더멘털 및 스퀴즈 재료 (총 25점)] -> 오타 수정. 총점 맞추기 위해 20점으로 조정.
+        # [카테고리 4: 펀더멘털 및 스퀴즈 재료 (총 20점)]
         if has_news:
             total_score += 10
-            score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "10 / 10", "reason": "오늘 펌핑을 정당화할 뉴스가 존재. 묻지마 펌핑 아님."})
+            score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "10 / 10", "reason": "오늘 펌핑을 정당화할 뉴스가 존재. 묻지마 펌핑 아닙니다."})
         else:
-            score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "0 / 10", "reason": "아무 뉴스 없음. 단순 숏커버링이나 장난일 확률 높아 본장 유지 힘듦."})
+            score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "0 / 10", "reason": "아무 뉴스 없음. 단순 숏커버링이나 세력 장난일 확률이 높습니다."})
 
         if total_cash > 5_000_000 or cash_ratio > 0.1:
             total_score += 5
-            score_details.append({"cat":"재무 (5점)","item": "유상증자 리스크 방어", "score": "5 / 5", "reason": "금고에 500만불 이상 있거나 시총대비 현금 양호. 장중 ATM 유증 직격탄 확률 낮음."})
+            score_details.append({"cat":"재무 (5점)","item": "유상증자 리스크 방어", "score": "5 / 5", "reason": "현금 흐름 양호. 장중 기습 유상증자 직격탄 확률이 낮습니다."})
         else:
             score_details.append({"cat":"재무 (5점)","item": "유상증자 리스크 방어", "score": "0 / 5", "reason": "🚨 현금 바닥 상태. 주가 띄워놓고 기습 유상증자(Offering) 때릴 확률 극히 높음."})
 
@@ -197,7 +199,7 @@ def analyze_ticker_ultimate(ticker_symbol):
         if short_pct >= 15: squeeze_score += 2
         
         total_score += squeeze_score
-        score_details.append({"cat":"가벼움 (5점)","item": "품절주 & 공매도", "score": f"{squeeze_score} / 5", "reason": "숏스퀴즈 모멘텀과 유통주식수 가벼움 정도 평가."})
+        score_details.append({"cat":"가벼움 (5점)","item": "품절주 & 공매도", "score": f"{squeeze_score} / 5", "reason": "숏스퀴즈 모멘텀과 유통주식수(가벼움 정도) 평가 완료."})
 
         # 최종 판정
         if total_score >= 85: tier = "👑 찐대장 (풀베팅 타겟)"
@@ -212,14 +214,16 @@ def analyze_ticker_ultimate(ticker_symbol):
             'details': score_details
         }
     except Exception as e:
-        return {"error": f"[{ticker_symbol}] 분석 중 오류: {str(e)}"}
+        # 에러 메시지 상세 출력 (디버깅 용도)
+        return {"error": f"[{ticker_symbol}] 분석 중 오류 발생: {str(e)}"}
 
 # --- [3] UI 화면 구성 ---
 st.title("🛡️ 100점 만점 프리마켓 정밀 판독기 (Final Edition)")
 st.markdown("차트 갭, 피보나치 방어선, 그리고 현금 고갈(유상증자) 리스크까지 모두 통과한 진짜 몬스터만 선별합니다.")
 st.markdown("---")
 
-input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", "GME, AMC, FFIE, HOLO, CRKN")
+# 기본 입력값을 비워두도록 수정 ("" 사용)
+input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", "")
 ticker_list = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
 
 if ticker_list:
