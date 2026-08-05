@@ -25,18 +25,32 @@ st.markdown("""
     .val-red { color: #FF5252; font-weight: bold;}
     .val-blue { color: #2196F3; font-weight: bold;}
     .val-yellow { color: #FFB020; font-weight: bold;}
+    .news-card { background-color: #252525; padding: 15px; border-radius: 6px; margin-bottom: 10px; transition: 0.3s;}
+    .news-card:hover { background-color: #2a2a2a; }
 </style>
 """, unsafe_allow_html=True)
 
-# [교정 1] 동전주/소형주 전용 지수 및 ETF 매핑 (대형주 ETF 제거)
 SECTOR_ETF_MAP = {
-    'Healthcare': 'XBI',         # 중소형 바이오 전용 ETF
-    'Technology': 'IWM',         # 러셀2000 소형주 지수 ETF
-    'Financial Services': 'IAI', # 중소형 금융/증권
-    'Industrials': 'IJR',        # 소형 산업재
-    'Consumer Cyclical': 'IWM',  # 소형 임의소비재
-    'Energy': 'XOP'              # 중소형 탐사/에너지
+    'Healthcare': 'XBI',
+    'Technology': 'IWM',
+    'Financial Services': 'IAI',
+    'Industrials': 'IJR',
+    'Consumer Cyclical': 'IWM',
+    'Energy': 'XOP'
 }
+
+# --- 실시간 Top 10 급등주 추출 ---
+@st.cache_data(ttl=60)
+def get_realtime_top_gainers():
+    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&region=US&scrIds=day_gainers&count=10"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        data = r.json()
+        quotes = data['finance']['result'][0]['quotes']
+        return [q['symbol'] for q in quotes]
+    except Exception:
+        return []
 
 # --- [2] 메인 데이터 분석 엔진 ---
 @st.cache_data(ttl=60)
@@ -47,16 +61,13 @@ def analyze_ticker_ultimate(ticker_symbol):
         score_details = []
         total_score = 0
         
-        # ------------------------------------------------
-        # 1. 일봉 데이터 (기존 로직)
-        # ------------------------------------------------
+        # 1. 일봉 데이터
         df_daily = ticker.history(period="1y", interval="1d")
         if len(df_daily) < 2:
             return {"error": f"[{ticker_symbol}] 일봉 데이터가 부족합니다."}
 
         df_daily['Prev_Close'] = df_daily['Close'].shift(1)
         df_daily['Prev_High'] = df_daily['High'].shift(1)
-        
         yest_close = df_daily['Prev_Close'].iloc[-1]
         yest_high = df_daily['Prev_High'].iloc[-1]
 
@@ -74,9 +85,7 @@ def analyze_ticker_ultimate(ticker_symbol):
         sma200 = df_daily['SMA200'].iloc[-1] if not pd.isna(df_daily['SMA200'].iloc[-1]) else 0
         adv_10 = df_daily['Volume'].tail(10).mean()
 
-        # ------------------------------------------------
-        # 2. 1분봉 데이터 (Finnhub + yFinance)
-        # ------------------------------------------------
+        # 2. 1분봉 데이터
         df_1m = pd.DataFrame()
         end_time = int(time.time())
         start_time = end_time - (86400 * 3) 
@@ -143,11 +152,7 @@ def analyze_ticker_ultimate(ticker_symbol):
         turnover_ratio = today_volume / float_shares if float_shares > 1 else 0
         cap_vs_vol_ratio = dollar_volume / market_cap if market_cap > 1 else 0
 
-        # ------------------------------------------------
-        # 3. 6대 심층 분석 데이터 수집
-        # ------------------------------------------------
-
-        # [PRO 1] SEC 공시 (유상증자 / 오퍼링 리스크 판별)
+        # 3. PRO 심층 분석 및 뉴스/재료 세부 분석
         offering_risk = False
         filings_url = f"https://finnhub.io/api/v1/stock/filings?symbol={ticker_symbol}&token={FINNHUB_API_KEY}"
         try:
@@ -160,40 +165,60 @@ def analyze_ticker_ultimate(ticker_symbol):
                         break
         except: pass
 
-        # [PRO 2] 거래량 가속도 (최근 30분 집중도)
         recent_30m_vol = df_1m['Volume'].tail(30).sum()
         vol_velocity_ratio = (recent_30m_vol / today_volume * 100) if today_volume > 0 else 0
 
-        # [PRO 3] PM High 수렴 및 Bull Flag
         dist_to_pm_high = ((pm_high - current_price) / pm_high) * 100 if pm_high > 0 else 999
         bull_flag_formed = (0 <= dist_to_pm_high <= 5.0) and (current_price >= vwap)
 
-        # [PRO 4] 숏 스퀴즈 데이터 (공매도 잔고 비율)
         short_pct_float = info.get('shortPercentOfFloat', 0) * 100 if info.get('shortPercentOfFloat') else 0
 
-        # [PRO 5] 뉴스 NLP 키워드 질적 분석
+        # --- [신규 기능] 뉴스 수집 및 개별 Sentiment 분석 ---
         raw_news = ticker.news
         has_news = len(raw_news) > 0
         news_score_added = 0
         news_nlp_reason = "뉴스 없음 또는 단순 일반 소식."
         
+        s_keywords = r"fda|approv|contract|acquisit|buyback|patent|dod|clear|merger"
+        a_keywords = r"earn|beat|partner|positiv|trial|phase"
+        f_keywords = r"conferenc|incentiv|complianc|notic|offer|direct|pric|public offering"
+
+        news_display_list = []
+
         if has_news:
-            s_keywords = r"fda|approv|contract|acquisit|buyback|patent|dod|clear|merger"
-            a_keywords = r"earn|beat|partner|positiv|trial|phase"
-            f_keywords = r"conferenc|incentiv|complianc|notic|offer|direct|pric|public offering"
-            
-            headline = raw_news[0]['title'].lower() if 'title' in raw_news[0] else ""
-            if re.search(f_keywords, headline):
+            # 첫 번째 뉴스 기반으로 점수 평가 (기존 로직)
+            headline_main = raw_news[0].get('title', '').lower()
+            if re.search(f_keywords, headline_main):
                 news_score_added = -10
                 news_nlp_reason = "🚨 [F급 재료] 오퍼링, 유증, 상폐경고 등 악재 키워드 감지."
-            elif re.search(s_keywords, headline):
+            elif re.search(s_keywords, headline_main):
                 news_score_added = 15
                 news_nlp_reason = "🔥 [S급 재료] FDA, 계약, 인수합병 등 초강력 호재 감지."
-            elif re.search(a_keywords, headline):
+            elif re.search(a_keywords, headline_main):
                 news_score_added = 5
                 news_nlp_reason = "📈 [A급 재료] 실적 호조, 파트너십 등 긍정적 모멘텀."
+            
+            # 리포트용 뉴스 리스트(최대 3개) 생성
+            for article in raw_news[:3]:
+                title = article.get('title', '제목 없음')
+                link = article.get('link', '#')
+                publisher = article.get('publisher', 'Unknown')
+                
+                lower_title = title.lower()
+                if re.search(f_keywords, lower_title):
+                    sentiment, color = "🚨 악재 (Risk)", "#FF5252"
+                elif re.search(s_keywords, lower_title):
+                    sentiment, color = "🔥 특급 호재 (Strong Bull)", "#4CAF50"
+                elif re.search(a_keywords, lower_title):
+                    sentiment, color = "📈 긍정적 (Bullish)", "#2196F3"
+                else:
+                    sentiment, color = "⚪ 중립 (Neutral)", "#888888"
+                    
+                news_display_list.append({
+                    "title": title, "link": link, "publisher": publisher,
+                    "sentiment": sentiment, "color": color
+                })
 
-        # [PRO 6] 소형주 테마 동반 상승 (교정된 ETF 매핑 적용)
         sector = info.get('sector', 'Unknown')
         sympathy_score = 0
         sympathy_reason = "소형주 섹터 모멘텀 미확인."
@@ -211,10 +236,8 @@ def analyze_ticker_ultimate(ticker_symbol):
             except: pass
 
         # ================================================================
-        # 🎯 [수정된 스코어링 엔진] Base 100점 + PRO 알파 가감점
+        # 스코어링 엔진 (Base 100점 + PRO 알파 가감점)
         # ================================================================
-
-        # --- 카테고리 1: 수급 (20점 만점) ---
         if dollar_volume >= 5_000_000:
             total_score += 10
             score_details.append({"cat":"수급 (10점)","item": "실거래 대금", "score": "10 / 10", "reason": f"${dollar_volume/1000000:.1f}M 유입. 세력 개입 확인."})
@@ -236,7 +259,6 @@ def analyze_ticker_ultimate(ticker_symbol):
         else:
             score_details.append({"cat":"수급 (5점)","item": "상대 거래량(RVOL)", "score": "0 / 5", "reason": "유의미한 거래량 폭발 없음."})
 
-        # --- 카테고리 2: 차트 (30점 만점) ---
         if current_price > yest_high:
             total_score += 10
             score_details.append({"cat":"차트 (10점)","item": "열린 갭 (전일 고점)", "score": "10 / 10", "reason": f"전일 고점(${yest_high:.2f}) 돌파. 매물대 없음."})
@@ -264,8 +286,6 @@ def analyze_ticker_ultimate(ticker_symbol):
         else:
             score_details.append({"cat":"차트 (5점)","item": "계단식 저점 방어", "score": "0 / 5", "reason": "저점 하락 중. 지속적인 덤핑 발생."})
 
-        # --- 카테고리 3: DNA / 매물대 (20점 만점) ---
-        # [교정 2] 과거 데이터 없을 시 만점이 아닌 중립 점수(5점) 부여
         if gap_win_rate is None:
             total_score += 5
             score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "5 / 10", "reason": "1년 내 갭상승 이력 없음 (중립 평가)."})
@@ -284,14 +304,12 @@ def analyze_ticker_ultimate(ticker_symbol):
             total_score += 10
             score_details.append({"cat":"매물대 (10점)","item": "장기 저항선(200일)", "score": "10 / 10", "reason": "200일선을 뚫었거나 멀리 있어 안전."})
 
-        # --- 카테고리 4: 재료 / 함정 방어 (30점 만점) ---
         if has_news:
             total_score += 10
             score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "10 / 10", "reason": "펌핑을 정당화할 뉴스 존재."})
         else:
             score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "0 / 10", "reason": "아무 뉴스 없음. 단순 장난 세력주."})
 
-        # [교정 3] SEC 유증 위험 시 현금 보유 점수 몰수
         if total_cash > 5_000_000 or cash_ratio > 0.1:
             if offering_risk:
                 score_details.append({"cat":"재무 (5점)","item": "기본 현금 흐름", "score": "0 / 5", "reason": "🚨 현금은 있으나 최근 SEC 유증 공시로 점수 몰수."})
@@ -301,7 +319,6 @@ def analyze_ticker_ultimate(ticker_symbol):
         else:
             score_details.append({"cat":"재무 (5점)","item": "기본 현금 흐름", "score": "0 / 5", "reason": "🚨 장부상 현금 부족 위험."})
 
-        # [교정 4] 역분할 착시 필터링 복원
         if gap_pct >= 200 and not has_news:
             score_details.append({"cat":"함정 (5점)","item": "역분할 착시 필터링", "score": "0 / 5", "reason": f"🚨 뉴스 없이 {gap_pct:.0f}% 폭등. 역분할 단가 변경 착시 99%."})
         else:
@@ -326,9 +343,7 @@ def analyze_ticker_ultimate(ticker_symbol):
             total_score += 5
             score_details.append({"cat":"과열도 (5점)","item": "시총 대비 대금 배수", "score": "5 / 5", "reason": "시총 대비 대금 비율 안정적."})
 
-        # --- 🔥 [PRO 심층 분석 알파 가감점 (Alpha Score)] ---
-        
-        # 1. SEC 공시 리스크
+        # --- PRO 심층 분석 알파 가감점 ---
         if offering_risk:
             total_score -= 30
             score_details.append({"cat":"🚨 PRO 리스크","item": "SEC S-3/424B 공시", "score": "-30 / 0", "reason": "최근 유상증자/오퍼링 등록. 개장 직후 덤핑 확률 극강."})
@@ -336,7 +351,6 @@ def analyze_ticker_ultimate(ticker_symbol):
             total_score += 5
             score_details.append({"cat":"🛡️ PRO 방어력","item": "SEC 악재 공시", "score": "+5 / 0", "reason": "최근 기습 신주 발행 등록 폼 없음."})
 
-        # 2. 거래량 가속도 (Velocity)
         if vol_velocity_ratio >= 40:
             total_score += 10
             score_details.append({"cat":"🔥 PRO 수급","item": "개장 직전 가속도", "score": "+10 / 0", "reason": f"최근 30분 비중 {vol_velocity_ratio:.1f}%. 개장 돌파 가능성 최상."})
@@ -344,28 +358,23 @@ def analyze_ticker_ultimate(ticker_symbol):
             total_score -= 10
             score_details.append({"cat":"🥶 PRO 수급","item": "개장 직전 가속도", "score": "-10 / 0", "reason": f"최근 30분 비중 {vol_velocity_ratio:.1f}%. 개미 꼬시기 의심."})
 
-        # 3. PM High & Bull Flag
         if bull_flag_formed:
             total_score += 10
             score_details.append({"cat":"🎯 PRO 차트","item": "PM High 수렴", "score": "+10 / 0", "reason": f"고점 대비 {-dist_to_pm_high:.1f}%. VWAP 위 에너지 응축 완료."})
         
-        # 4. 공매도 숏스퀴즈
         if short_pct_float > 20:
             total_score += 15
             score_details.append({"cat":"🚀 PRO 스퀴즈","item": "숏 잔고 비율", "score": "+15 / 0", "reason": f"유통주 대비 공매도 {short_pct_float:.1f}%. 본장 숏커버 빔 예상."})
 
-        # 5. 뉴스 NLP 분석
         if news_score_added != 0:
             total_score += news_score_added
             prefix = "+" if news_score_added > 0 else ""
             score_details.append({"cat":"📰 PRO 재료","item": "뉴스 키워드 NLP", "score": f"{prefix}{news_score_added} / 0", "reason": news_nlp_reason})
 
-        # 6. 소형주 테마 동반 상승
         if sympathy_score > 0:
             total_score += sympathy_score
             score_details.append({"cat":"👯 PRO 테마","item": "섹터 모멘텀", "score": f"+{sympathy_score} / 0", "reason": sympathy_reason})
 
-        # [교정 5] 최종 등급 판정 기준 현실화
         if total_score >= 110: tier = "🚀 우주 돌파 (SS급 대장)"
         elif total_score >= 85: tier = "👑 찐대장 (S급, 본장 돌파 유력)"
         elif total_score >= 65: tier = "🔥 A급 (단타/눌림목 유효)"
@@ -373,9 +382,6 @@ def analyze_ticker_ultimate(ticker_symbol):
         elif total_score >= 30: tier = "🟡 C급 (주의 요망)"
         else: tier = "☠️ F급 (개미 무덤/설거지 확정)"
 
-        # ------------------------------------------------
-        # 🚨 핵심 결함 (참고용 블랙리스트)
-        # ------------------------------------------------
         red_flags = []
         country = info.get('country', 'Unknown')
         employees = info.get('fullTimeEmployees', 0)
@@ -408,17 +414,31 @@ def analyze_ticker_ultimate(ticker_symbol):
         return {
             'ticker': ticker_symbol, 'price': current_price, 'gap': gap_pct,
             'dollar_vol': dollar_volume, 'score': total_score, 'tier': tier,
-            'details': score_details, 'red_flags': red_flags
+            'details': score_details, 'red_flags': red_flags, 'news_data': news_display_list
         }
     except Exception as e:
         return {"error": f"[{ticker_symbol}] 분석 중 오류 발생: {str(e)}"}
 
 # --- [3] UI 화면 구성 ---
 st.title("🛡️ 동전주 정밀 몬스터 스캐너 (FINAL ULTIMATE Edition)")
-st.markdown("수급/차트 **Base 100점** 구조에 **6대 심층 분석 알파 점수가 적용된 최종 검증 스캐너입니다.**")
+st.markdown("수급/차트 **Base 100점** 구조에 **6대 심층 분석 알파 점수** 및 **실시간 뉴스 모멘텀 분석**이 적용되었습니다.")
 st.markdown("---")
 
-input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", "EZRA, HYFM, WETO")
+if "search_input" not in st.session_state:
+    st.session_state["search_input"] = "EZRA, HYFM, WETO"
+
+top_gainers = get_realtime_top_gainers()
+
+if top_gainers:
+    top_gainers_str = ", ".join(top_gainers)
+    st.markdown(f"**🔥 실시간 미국장 급등주 Top 10:** `< {top_gainers_str} >`", unsafe_allow_html=True)
+    if st.button("🚀 Top 10 스캐너에 자동 입력하기"):
+        st.session_state["search_input"] = top_gainers_str
+        st.rerun()
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", key="search_input")
 ticker_list = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
 
 if ticker_list:
@@ -474,7 +494,26 @@ if ticker_list:
         html_table += "</tbody></table>"
         st.markdown(html_table, unsafe_allow_html=True)
 
-        # 2. 핵심 결함 (참고용 블랙리스트)
+        # 2. [신규] 뉴스 모멘텀 분석 UI
+        if data.get('news_data'):
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("### 📰 최근 핵심 뉴스 및 재료 분석")
+            for news in data['news_data']:
+                st.markdown(f"""
+                <div class='news-card' style='border-left: 5px solid {news['color']};'>
+                    <div style='font-size: 13px; color: #aaa; margin-bottom: 6px;'>
+                        <span style='color: {news['color']}; font-weight: bold;'>{news['sentiment']}</span> 
+                        &nbsp;|&nbsp; 출처: {news['publisher']}
+                    </div>
+                    <a href='{news['link']}' target='_blank' style='color: #fff; text-decoration: none; font-size: 16px; font-weight: 500;'>
+                        {news['title']}
+                    </a>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown("<br><p style='color:#888;'>최근 발표된 주요 뉴스가 없습니다. (단순 세력 수급일 가능성 농후)</p>", unsafe_allow_html=True)
+
+        # 3. 핵심 결함 (참고용 블랙리스트)
         if data.get('red_flags'):
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("### ⚠️ 동전주 기업 실체 및 치명적 리스크")
