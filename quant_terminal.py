@@ -39,19 +39,6 @@ SECTOR_ETF_MAP = {
     'Energy': 'XOP'
 }
 
-# --- 실시간 Top 10 급등주 추출 ---
-@st.cache_data(ttl=60)
-def get_realtime_top_gainers():
-    url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&region=US&scrIds=day_gainers&count=10"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    try:
-        r = requests.get(url, headers=headers, timeout=5)
-        data = r.json()
-        quotes = data['finance']['result'][0]['quotes']
-        return [q['symbol'] for q in quotes]
-    except Exception:
-        return []
-
 # --- [2] 메인 데이터 분석 엔진 ---
 @st.cache_data(ttl=60)
 def analyze_ticker_ultimate(ticker_symbol):
@@ -173,7 +160,7 @@ def analyze_ticker_ultimate(ticker_symbol):
 
         short_pct_float = info.get('shortPercentOfFloat', 0) * 100 if info.get('shortPercentOfFloat') else 0
 
-        # --- [신규 기능] 뉴스 수집 및 개별 Sentiment 분석 ---
+        # 뉴스 수집 및 개별 Sentiment 분석
         raw_news = ticker.news
         has_news = len(raw_news) > 0
         news_score_added = 0
@@ -186,7 +173,6 @@ def analyze_ticker_ultimate(ticker_symbol):
         news_display_list = []
 
         if has_news:
-            # 첫 번째 뉴스 기반으로 점수 평가 (기존 로직)
             headline_main = raw_news[0].get('title', '').lower()
             if re.search(f_keywords, headline_main):
                 news_score_added = -10
@@ -198,7 +184,6 @@ def analyze_ticker_ultimate(ticker_symbol):
                 news_score_added = 5
                 news_nlp_reason = "📈 [A급 재료] 실적 호조, 파트너십 등 긍정적 모멘텀."
             
-            # 리포트용 뉴스 리스트(최대 3개) 생성
             for article in raw_news[:3]:
                 title = article.get('title', '제목 없음')
                 link = article.get('link', '#')
@@ -235,9 +220,7 @@ def analyze_ticker_ultimate(ticker_symbol):
                         sympathy_reason = f"소형주 섹터({sector}/{etf}) 평이. 개별 세력주 움직임."
             except: pass
 
-        # ================================================================
         # 스코어링 엔진 (Base 100점 + PRO 알파 가감점)
-        # ================================================================
         if dollar_volume >= 5_000_000:
             total_score += 10
             score_details.append({"cat":"수급 (10점)","item": "실거래 대금", "score": "10 / 10", "reason": f"${dollar_volume/1000000:.1f}M 유입. 세력 개입 확인."})
@@ -334,15 +317,6 @@ def analyze_ticker_ultimate(ticker_symbol):
             total_score += 5
             score_details.append({"cat":"과열도 (5점)","item": "유통 회전율", "score": "5 / 5", "reason": f"유통주식 {turnover_ratio:.1f}회전. 매물 소화 양호."})
 
-        if market_cap < 50_000_000 and cap_vs_vol_ratio > 5:
-            score_details.append({"cat":"과열도 (5점)","item": "시총 대비 대금 배수", "score": "0 / 5", "reason": f"🚨 초소형 시총에 대금이 {cap_vs_vol_ratio:.1f}배 터짐. 세력 설거지."})
-        elif cap_vs_vol_ratio >= 1:
-            total_score += 3
-            score_details.append({"cat":"과열도 (5점)","item": "시총 대비 대금 배수", "score": "3 / 5", "reason": f"시총의 {cap_vs_vol_ratio:.1f}배 유동성 유입."})
-        else:
-            total_score += 5
-            score_details.append({"cat":"과열도 (5점)","item": "시총 대비 대금 배수", "score": "5 / 5", "reason": "시총 대비 대금 비율 안정적."})
-
         # --- PRO 심층 분석 알파 가감점 ---
         if offering_risk:
             total_score -= 30
@@ -424,21 +398,11 @@ st.title("🛡️ 동전주 정밀 몬스터 스캐너 (FINAL ULTIMATE Edition)"
 st.markdown("수급/차트 **Base 100점** 구조에 **6대 심층 분석 알파 점수** 및 **실시간 뉴스 모멘텀 분석**이 적용되었습니다.")
 st.markdown("---")
 
+# 검색창 초기 상태를 완전 빈칸으로 설정
 if "search_input" not in st.session_state:
-    st.session_state["search_input"] = "EZRA, HYFM, WETO"
+    st.session_state["search_input"] = ""
 
-top_gainers = get_realtime_top_gainers()
-
-if top_gainers:
-    top_gainers_str = ", ".join(top_gainers)
-    st.markdown(f"**🔥 실시간 미국장 급등주 Top 10:** `< {top_gainers_str} >`", unsafe_allow_html=True)
-    if st.button("🚀 Top 10 스캐너에 자동 입력하기"):
-        st.session_state["search_input"] = top_gainers_str
-        st.rerun()
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분)", key="search_input")
+input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분, 예: CISS, ZJYL, BJDX)", key="search_input")
 ticker_list = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
 
 if ticker_list:
@@ -494,7 +458,7 @@ if ticker_list:
         html_table += "</tbody></table>"
         st.markdown(html_table, unsafe_allow_html=True)
 
-        # 2. [신규] 뉴스 모멘텀 분석 UI
+        # 2. 뉴스 모멘텀 분석 UI
         if data.get('news_data'):
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("### 📰 최근 핵심 뉴스 및 재료 분석")
