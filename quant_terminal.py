@@ -150,4 +150,4 @@ if st.button("조건 검색 실행"):
                 return "background-color: #e6ffe6; color: #006600; font-weight: bold"
             return ""
             
-        st.dataframe(result_df.style.applymap(highlight_rows, subset=['분석 결과']), use_container_width=True)
+       st.dataframe(result_df.style.map(highlight_rows, subset=['분석 결과']), use_container_width=True)
