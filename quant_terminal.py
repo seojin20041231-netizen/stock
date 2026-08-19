@@ -1,503 +1,153 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import requests
-import time
-import re
+from datetime import datetime, timedelta
 
-# --- [1] 기본 설정 및 API 키 ---
-FINNHUB_API_KEY = "d9nksmpr01qvumganiogd9nksmpr01qvumganip0"
-
-st.set_page_config(page_title="동전주 몬스터 스캐너 (FINAL ULTIMATE)", layout="wide")
+st.set_page_config(page_title="급등주 2차 타점 검색기 PRO", layout="wide")
+st.title("🚀 급등주 2차 타점 검색기 PRO (갭돌파 & 윗꼬리 필터링)")
 
 st.markdown("""
-<style>
-    .stApp { background-color: #121212; color: #FFFFFF; }
-    .card-container { background-color: #1E1E1E; padding: 22px; border-radius: 12px; border: 1px solid #333; margin-bottom: 20px; }
-    .score-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    .score-table th, .score-table td { border: 1px solid #444; padding: 10px; text-align: left; font-size: 14px; }
-    .score-table th { background-color: #2D2D2D; color: #aaa; font-weight: bold;}
-    .rf-table { width: 100%; border-collapse: collapse; margin-top: 10px; background-color: #181818; color: #d4d4d4;}
-    .rf-table th, .rf-table td { border: 1px solid #333; padding: 10px; text-align: left; font-size: 13px; }
-    .rf-table th { background-color: #252525; color: #fff; font-weight: bold; text-align: center;}
-    .val-green { color: #4CAF50; font-weight: bold;}
-    .val-red { color: #FF5252; font-weight: bold;}
-    .val-blue { color: #2196F3; font-weight: bold;}
-    .val-yellow { color: #FFB020; font-weight: bold;}
-    .news-card { background-color: #252525; padding: 15px; border-radius: 6px; margin-bottom: 10px; transition: 0.3s;}
-    .news-card:hover { background-color: #2a2a2a; }
-</style>
-""", unsafe_allow_html=True)
+**[핵심 매매 철학]**  
+1. 첫 거래량 폭발은 패스, 두 번째 기회를 노린다.
+2. 하락 시 거래량은 무조건 줄어야 한다. 터지면 위험!
+3. 윗꼬리가 긴 캔들은 악성 매물이므로 피한다.
+4. 강력한 저항인 '하락 갭'을 갭상승으로 돌파하면 스윙(Swing) 기회다.
+""")
 
-SECTOR_ETF_MAP = {
-    'Healthcare': 'XBI',
-    'Technology': 'IWM',
-    'Financial Services': 'IAI',
-    'Industrials': 'IJR',
-    'Consumer Cyclical': 'IWM',
-    'Energy': 'XOP'
-}
+# 사이드바 설정
+st.sidebar.header("검색 조건 설정")
+target_value = st.sidebar.number_input("기준 거래대금 (원)", value=1000000000, step=100000000)
+volume_spike_ratio = st.sidebar.slider("첫날 거래량 급등 기준 (몇 배?)", 2.0, 10.0, 5.0)
 
-# --- [2] 메인 데이터 분석 엔진 ---
-@st.cache_data(ttl=60)
-def analyze_ticker_ultimate(ticker_symbol):
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        info = ticker.info
-        score_details = []
-        total_score = 0
-        
-        # 1. 일봉 데이터
-        df_daily = ticker.history(period="1y", interval="1d")
-        if len(df_daily) < 2:
-            return {"error": f"[{ticker_symbol}] 일봉 데이터가 부족합니다."}
+tickers_input = st.sidebar.text_area("종목 티커 입력 (쉼표로 구분)", "005930.KS, 035420.KS, 035720.KS, 000660.KS")
+tickers = [t.strip() for t in tickers_input.split(",")]
 
-        df_daily['Prev_Close'] = df_daily['Close'].shift(1)
-        df_daily['Prev_High'] = df_daily['High'].shift(1)
-        yest_close = df_daily['Prev_Close'].iloc[-1]
-        yest_high = df_daily['Prev_High'].iloc[-1]
+@st.cache_data(ttl=3600)
+def fetch_data(ticker):
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=180)
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    return df
 
-        df_daily['Gap_Pct'] = (df_daily['Open'] - df_daily['Prev_Close']) / df_daily['Prev_Close'] * 100
-        gap_days = df_daily[df_daily['Gap_Pct'] >= 10.0]
-        if len(gap_days) > 0:
-            win_days = gap_days[gap_days['Close'] > gap_days['Open']]
-            gap_win_rate = (len(win_days) / len(gap_days)) * 100
-            total_gaps = len(gap_days)
-        else:
-            gap_win_rate = None 
-            total_gaps = 0
-
-        df_daily['SMA200'] = df_daily['Close'].rolling(window=200, min_periods=50).mean()
-        sma200 = df_daily['SMA200'].iloc[-1] if not pd.isna(df_daily['SMA200'].iloc[-1]) else 0
-        adv_10 = df_daily['Volume'].tail(10).mean()
-
-        # 2. 1분봉 데이터
-        df_1m = pd.DataFrame()
-        end_time = int(time.time())
-        start_time = end_time - (86400 * 3) 
-        
-        fh_url = f"https://finnhub.io/api/v1/stock/candle?symbol={ticker_symbol}&resolution=1&from={start_time}&to={end_time}&token={FINNHUB_API_KEY}"
-        try:
-            r = requests.get(fh_url, timeout=5)
-            fh_data = r.json()
-            if fh_data.get('s') == 'ok':
-                df_1m = pd.DataFrame({
-                    'Close': fh_data['c'], 'High': fh_data['h'],
-                    'Low': fh_data['l'], 'Open': fh_data['o'], 'Volume': fh_data['v']
-                })
-        except Exception:
-            pass 
-
-        if df_1m.empty:
-            df_1m = ticker.history(period="1d", interval="1m", prepost=True)
-            if df_1m.empty:
-                return {"error": f"[{ticker_symbol}] 당일 1분봉 데이터가 없습니다."}
-
-        current_price = df_1m['Close'].iloc[-1]
-        pm_high = df_1m['High'].max()
-        pm_low = df_1m['Low'].min()
-
-        vol_1m_sum = df_1m['Volume'].sum()
-        vol_daily = df_daily['Volume'].iloc[-1] if not pd.isna(df_daily['Volume'].iloc[-1]) else 0
-        vol_info = info.get('volume', 0)
-        
-        today_volume = max(vol_1m_sum, vol_daily, vol_info)
-        if today_volume <= 0: today_volume = 1 
-            
-        dollar_volume = current_price * today_volume
-
-        fib_range = pm_high - pm_low
-        fib_382 = pm_high - (fib_range * 0.382)
-        fib_618 = pm_high - (fib_range * 0.618)
-
-        higher_lows = False
-        if len(df_1m) >= 30:
-            chunk_size = len(df_1m) // 3
-            c1_low = df_1m['Low'].iloc[:chunk_size].min()
-            c2_low = df_1m['Low'].iloc[chunk_size:chunk_size*2].min()
-            c3_low = df_1m['Low'].iloc[chunk_size*2:].min()
-            if (c3_low > c2_low) and (c2_low >= c1_low):
-                higher_lows = True
-
-        recent_60m_vol = df_1m['Volume'].tail(60).sum()
-        vol_concentration = (recent_60m_vol / today_volume * 100) if today_volume > 0 else 0
-        
-        tp = (df_1m['High'] + df_1m['Low'] + df_1m['Close']) / 3
-        cum_v = df_1m['Volume'].cumsum()
-        vwap = ((tp * df_1m['Volume']).cumsum() / cum_v.replace(0, 1)).iloc[-1]
-        
-        gap_pct = ((current_price - yest_close) / yest_close) * 100
-        rvol = (today_volume / adv_10) * 100 if adv_10 > 0 else 0
-        dist_to_sma200 = ((sma200 - current_price) / current_price) * 100 if sma200 > 0 else 999
-        
-        float_shares = info.get('floatShares', info.get('sharesOutstanding', 1))
-        market_cap = info.get('marketCap', 1)
-        total_cash = info.get('totalCash', 0)
-        cash_ratio = total_cash / market_cap if market_cap > 0 else 0
-        
-        turnover_ratio = today_volume / float_shares if float_shares > 1 else 0
-        cap_vs_vol_ratio = dollar_volume / market_cap if market_cap > 1 else 0
-
-        # 3. PRO 심층 분석 및 뉴스/재료 세부 분석
-        offering_risk = False
-        filings_url = f"https://finnhub.io/api/v1/stock/filings?symbol={ticker_symbol}&token={FINNHUB_API_KEY}"
-        try:
-            r_filings = requests.get(filings_url, timeout=3).json()
-            if isinstance(r_filings, list):
-                for f in r_filings[:10]:
-                    form = f.get('form', '').upper()
-                    if form in ['S-1', 'S-3', '424B3', '424B4', '424B5']:
-                        offering_risk = True
-                        break
-        except: pass
-
-        recent_30m_vol = df_1m['Volume'].tail(30).sum()
-        vol_velocity_ratio = (recent_30m_vol / today_volume * 100) if today_volume > 0 else 0
-
-        dist_to_pm_high = ((pm_high - current_price) / pm_high) * 100 if pm_high > 0 else 999
-        bull_flag_formed = (0 <= dist_to_pm_high <= 5.0) and (current_price >= vwap)
-
-        short_pct_float = info.get('shortPercentOfFloat', 0) * 100 if info.get('shortPercentOfFloat') else 0
-
-        # 뉴스 수집 및 개별 Sentiment 분석
-        raw_news = ticker.news
-        has_news = len(raw_news) > 0
-        news_score_added = 0
-        news_nlp_reason = "뉴스 없음 또는 단순 일반 소식."
-        
-        s_keywords = r"fda|approv|contract|acquisit|buyback|patent|dod|clear|merger"
-        a_keywords = r"earn|beat|partner|positiv|trial|phase"
-        f_keywords = r"conferenc|incentiv|complianc|notic|offer|direct|pric|public offering"
-
-        news_display_list = []
-
-        if has_news:
-            headline_main = raw_news[0].get('title', '').lower()
-            if re.search(f_keywords, headline_main):
-                news_score_added = -10
-                news_nlp_reason = "🚨 [F급 재료] 오퍼링, 유증, 상폐경고 등 악재 키워드 감지."
-            elif re.search(s_keywords, headline_main):
-                news_score_added = 15
-                news_nlp_reason = "🔥 [S급 재료] FDA, 계약, 인수합병 등 초강력 호재 감지."
-            elif re.search(a_keywords, headline_main):
-                news_score_added = 5
-                news_nlp_reason = "📈 [A급 재료] 실적 호조, 파트너십 등 긍정적 모멘텀."
-            
-            for article in raw_news[:3]:
-                title = article.get('title', '제목 없음')
-                link = article.get('link', '#')
-                publisher = article.get('publisher', 'Unknown')
-                
-                lower_title = title.lower()
-                if re.search(f_keywords, lower_title):
-                    sentiment, color = "🚨 악재 (Risk)", "#FF5252"
-                elif re.search(s_keywords, lower_title):
-                    sentiment, color = "🔥 특급 호재 (Strong Bull)", "#4CAF50"
-                elif re.search(a_keywords, lower_title):
-                    sentiment, color = "📈 긍정적 (Bullish)", "#2196F3"
-                else:
-                    sentiment, color = "⚪ 중립 (Neutral)", "#888888"
-                    
-                news_display_list.append({
-                    "title": title, "link": link, "publisher": publisher,
-                    "sentiment": sentiment, "color": color
-                })
-
-        sector = info.get('sector', 'Unknown')
-        sympathy_score = 0
-        sympathy_reason = "소형주 섹터 모멘텀 미확인."
-        if sector in SECTOR_ETF_MAP:
-            etf = SECTOR_ETF_MAP[sector]
-            try:
-                etf_df = yf.Ticker(etf).history(period="2d")
-                if len(etf_df) >= 2:
-                    etf_gap = (etf_df['Open'].iloc[-1] - etf_df['Close'].iloc[-2]) / etf_df['Close'].iloc[-2] * 100
-                    if etf_gap > 0.3:
-                        sympathy_score = 5
-                        sympathy_reason = f"동종 소형주 섹터({sector}/{etf}) 갭상승 중. 테마 동반 수급 징후."
-                    else:
-                        sympathy_reason = f"소형주 섹터({sector}/{etf}) 평이. 개별 세력주 움직임."
-            except: pass
-
-        # 스코어링 엔진 (Base 100점 + PRO 알파 가감점)
-        if dollar_volume >= 5_000_000:
-            total_score += 10
-            score_details.append({"cat":"수급 (10점)","item": "실거래 대금", "score": "10 / 10", "reason": f"${dollar_volume/1000000:.1f}M 유입. 세력 개입 확인."})
-        elif dollar_volume >= 1_000_000:
-            total_score += 5
-            score_details.append({"cat":"수급 (10점)","item": "실거래 대금", "score": "5 / 10", "reason": f"${dollar_volume/1000000:.1f}M. 대금 발생 (관찰 요망)."})
-        else:
-            score_details.append({"cat":"수급 (10점)","item": "실거래 대금", "score": "0 / 10", "reason": "거래대금 100만불 미만. 호가창 가짜 매물."})
-
-        if vol_concentration >= 40:
-            total_score += 5
-            score_details.append({"cat":"수급 (5점)","item": "거래량 집중도(60분)", "score": "5 / 5", "reason": f"최근 1시간 비중 {vol_concentration:.1f}%. 매수세 점화."})
-        else:
-            score_details.append({"cat":"수급 (5점)","item": "거래량 집중도(60분)", "score": "0 / 5", "reason": f"비중 {vol_concentration:.1f}%. 수급 소외 중."})
-
-        if rvol >= 100:
-            total_score += 5
-            score_details.append({"cat":"수급 (5점)","item": "상대 거래량(RVOL)", "score": "5 / 5", "reason": "과거 10일 평균 거래량을 돌파."})
-        else:
-            score_details.append({"cat":"수급 (5점)","item": "상대 거래량(RVOL)", "score": "0 / 5", "reason": "유의미한 거래량 폭발 없음."})
-
-        if current_price > yest_high:
-            total_score += 10
-            score_details.append({"cat":"차트 (10점)","item": "열린 갭 (전일 고점)", "score": "10 / 10", "reason": f"전일 고점(${yest_high:.2f}) 돌파. 매물대 없음."})
-        else:
-            score_details.append({"cat":"차트 (10점)","item": "열린 갭 (전일 고점)", "score": "0 / 10", "reason": f"전일 고점 아래 갇힌 갭. 매물 폭탄 주의."})
-
-        if current_price >= fib_382:
-            total_score += 10
-            score_details.append({"cat":"차트 (10점)","item": "피보나치 눌림목", "score": "10 / 10", "reason": "38.2% 이내만 내어준 극강의 방어력."})
-        elif current_price >= fib_618:
-            total_score += 5
-            score_details.append({"cat":"차트 (10점)","item": "피보나치 눌림목", "score": "5 / 10", "reason": "61.8% 방어선 지지 중. 관망 필요."})
-        else:
-            score_details.append({"cat":"차트 (10점)","item": "피보나치 눌림목", "score": "0 / 10", "reason": "🚨 61.8% 붕괴. 데드캣 바운스 의심."})
-
-        if current_price >= vwap:
-            total_score += 5
-            score_details.append({"cat":"차트 (5점)","item": "VWAP (생명선)", "score": "5 / 5", "reason": f"당일 평균 단가(${vwap:.2f}) 위에서 지지."})
-        else:
-            score_details.append({"cat":"차트 (5점)","item": "VWAP (생명선)", "score": "0 / 5", "reason": "VWAP 붕괴. 투매 리스크 고조."})
-
-        if higher_lows:
-            total_score += 5
-            score_details.append({"cat":"차트 (5점)","item": "계단식 저점 방어", "score": "5 / 5", "reason": "저점을 갱신하며 매물을 소화하는 패턴."})
-        else:
-            score_details.append({"cat":"차트 (5점)","item": "계단식 저점 방어", "score": "0 / 5", "reason": "저점 하락 중. 지속적인 덤핑 발생."})
-
-        if gap_win_rate is None:
-            total_score += 5
-            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "5 / 10", "reason": "1년 내 갭상승 이력 없음 (중립 평가)."})
-        elif gap_win_rate >= 50 and total_gaps >= 3:
-            total_score += 10
-            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "10 / 10", "reason": f"승률 {gap_win_rate:.1f}%. 신뢰도 높음."})
-        elif gap_win_rate < 20 and total_gaps >= 3:
-            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "0 / 10", "reason": f"🚨 과거 덤핑 확률 {100-gap_win_rate:.1f}%. 상습 설거지."})
-        else:
-            total_score += 5
-            score_details.append({"cat":"DNA (10점)","item": "과거 갭상승 승률", "score": "5 / 10", "reason": f"승률 {gap_win_rate:.1f}%. 본장 수급 확인."})
-
-        if 0 < dist_to_sma200 <= 5.0:
-            score_details.append({"cat":"매물대 (10점)","item": "장기 저항선(200일)", "score": "0 / 10", "reason": f"현재가 바로 위 200일선 위치. 매물대 직격."})
-        else:
-            total_score += 10
-            score_details.append({"cat":"매물대 (10점)","item": "장기 저항선(200일)", "score": "10 / 10", "reason": "200일선을 뚫었거나 멀리 있어 안전."})
-
-        if has_news:
-            total_score += 10
-            score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "10 / 10", "reason": "펌핑을 정당화할 뉴스 존재."})
-        else:
-            score_details.append({"cat":"재료 (10점)","item": "상승 명분 (뉴스)", "score": "0 / 10", "reason": "아무 뉴스 없음. 단순 장난 세력주."})
-
-        if total_cash > 5_000_000 or cash_ratio > 0.1:
-            if offering_risk:
-                score_details.append({"cat":"재무 (5점)","item": "기본 현금 흐름", "score": "0 / 5", "reason": "🚨 현금은 있으나 최근 SEC 유증 공시로 점수 몰수."})
-            else:
-                total_score += 5
-                score_details.append({"cat":"재무 (5점)","item": "기본 현금 흐름", "score": "5 / 5", "reason": "장부상 현금 흐름 양호 및 유증 공시 없음."})
-        else:
-            score_details.append({"cat":"재무 (5점)","item": "기본 현금 흐름", "score": "0 / 5", "reason": "🚨 장부상 현금 부족 위험."})
-
-        if gap_pct >= 200 and not has_news:
-            score_details.append({"cat":"함정 (5점)","item": "역분할 착시 필터링", "score": "0 / 5", "reason": f"🚨 뉴스 없이 {gap_pct:.0f}% 폭등. 역분할 단가 변경 착시 99%."})
-        else:
-            total_score += 5
-            score_details.append({"cat":"함정 (5점)","item": "역분할 착시 필터링", "score": "5 / 5", "reason": "역분할 단가 변경 징후 없음."})
-
-        if turnover_ratio > 10:
-            score_details.append({"cat":"과열도 (5점)","item": "유통 회전율", "score": "0 / 5", "reason": f"🚨 유통주식 {turnover_ratio:.1f}회전. 극단적 폭탄 돌리기."})
-        elif turnover_ratio > 3:
-            total_score += 3
-            score_details.append({"cat":"과열도 (5점)","item": "유통 회전율", "score": "3 / 5", "reason": f"유통주식 {turnover_ratio:.1f}회전. 주도주 편입."})
-        else:
-            total_score += 5
-            score_details.append({"cat":"과열도 (5점)","item": "유통 회전율", "score": "5 / 5", "reason": f"유통주식 {turnover_ratio:.1f}회전. 매물 소화 양호."})
-
-        # --- PRO 심층 분석 알파 가감점 ---
-        if offering_risk:
-            total_score -= 30
-            score_details.append({"cat":"🚨 PRO 리스크","item": "SEC S-3/424B 공시", "score": "-30 / 0", "reason": "최근 유상증자/오퍼링 등록. 개장 직후 덤핑 확률 극강."})
-        else:
-            total_score += 5
-            score_details.append({"cat":"🛡️ PRO 방어력","item": "SEC 악재 공시", "score": "+5 / 0", "reason": "최근 기습 신주 발행 등록 폼 없음."})
-
-        if vol_velocity_ratio >= 40:
-            total_score += 10
-            score_details.append({"cat":"🔥 PRO 수급","item": "개장 직전 가속도", "score": "+10 / 0", "reason": f"최근 30분 비중 {vol_velocity_ratio:.1f}%. 개장 돌파 가능성 최상."})
-        elif vol_velocity_ratio < 10 and today_volume > 1:
-            total_score -= 10
-            score_details.append({"cat":"🥶 PRO 수급","item": "개장 직전 가속도", "score": "-10 / 0", "reason": f"최근 30분 비중 {vol_velocity_ratio:.1f}%. 개미 꼬시기 의심."})
-
-        if bull_flag_formed:
-            total_score += 10
-            score_details.append({"cat":"🎯 PRO 차트","item": "PM High 수렴", "score": "+10 / 0", "reason": f"고점 대비 {-dist_to_pm_high:.1f}%. VWAP 위 에너지 응축 완료."})
-        
-        if short_pct_float > 20:
-            total_score += 15
-            score_details.append({"cat":"🚀 PRO 스퀴즈","item": "숏 잔고 비율", "score": "+15 / 0", "reason": f"유통주 대비 공매도 {short_pct_float:.1f}%. 본장 숏커버 빔 예상."})
-
-        if news_score_added != 0:
-            total_score += news_score_added
-            prefix = "+" if news_score_added > 0 else ""
-            score_details.append({"cat":"📰 PRO 재료","item": "뉴스 키워드 NLP", "score": f"{prefix}{news_score_added} / 0", "reason": news_nlp_reason})
-
-        if sympathy_score > 0:
-            total_score += sympathy_score
-            score_details.append({"cat":"👯 PRO 테마","item": "섹터 모멘텀", "score": f"+{sympathy_score} / 0", "reason": sympathy_reason})
-
-        if total_score >= 110: tier = "🚀 우주 돌파 (SS급 대장)"
-        elif total_score >= 85: tier = "👑 찐대장 (S급, 본장 돌파 유력)"
-        elif total_score >= 65: tier = "🔥 A급 (단타/눌림목 유효)"
-        elif total_score >= 45: tier = "🎯 B급 (관망/수급 확인)"
-        elif total_score >= 30: tier = "🟡 C급 (주의 요망)"
-        else: tier = "☠️ F급 (개미 무덤/설거지 확정)"
-
-        red_flags = []
-        country = info.get('country', 'Unknown')
-        employees = info.get('fullTimeEmployees', 0)
-
-        if offering_risk:
-            red_flags.append({
-                "결함": "SEC 오퍼링 등록",
-                "실체": "최근 S-3/424B 공시 존재. 프리마켓 펌핑 후 본장 개장 시 회사 물량 덤핑 가능성 매우 높음.",
-                "가이드": "🔴 절대 매수 금지 (또는 단타 시 칼손절)"
-            })
-        if current_price < 1.0:
-            red_flags.append({
-                "결함": "나스닥 $1 미달 규정",
-                "실체": f"현재가 ${current_price:.2f}. 동전주 단골 손님으로 언제든 역분할 빔 가능성 보유.",
-                "가이드": "🟡 당일 단타만 허용 (오버나잇 금지)"
-            })
-        if country in ['China', 'Hong Kong', 'Macau']:
-            red_flags.append({
-                "결함": "중국계/홍콩 기업",
-                "실체": f"본사 위치: {country}. 잦은 테마 변경 및 기습 덤핑 리스크.",
-                "가이드": "🟡 급등 시 즉시 차익실현"
-            })
-        if 0 < employees < 20:
-            red_flags.append({
-                "결함": "소규모/유령회사 의심",
-                "실체": f"정규직 직원 수 단 {employees}명. pure 세력 수급 주도.",
-                "가이드": "🟡 수급 깨지면 미련 없이 손절"
-            })
-
-        return {
-            'ticker': ticker_symbol, 'price': current_price, 'gap': gap_pct,
-            'dollar_vol': dollar_volume, 'score': total_score, 'tier': tier,
-            'details': score_details, 'red_flags': red_flags, 'news_data': news_display_list
-        }
-    except Exception as e:
-        return {"error": f"[{ticker_symbol}] 분석 중 오류 발생: {str(e)}"}
-
-# --- [3] UI 화면 구성 ---
-st.title("🛡️ 동전주 정밀 몬스터 스캐너 (FINAL ULTIMATE Edition)")
-st.markdown("수급/차트 **Base 100점** 구조에 **6대 심층 분석 알파 점수** 및 **실시간 뉴스 모멘텀 분석**이 적용되었습니다.")
-st.markdown("---")
-
-# 검색창 초기 상태를 완전 빈칸으로 설정
-if "search_input" not in st.session_state:
-    st.session_state["search_input"] = ""
-
-input_tickers = st.text_input("🔍 종목 입력 (쉼표 구분, 예: CISS, ZJYL, BJDX)", key="search_input")
-ticker_list = [t.strip().upper() for t in input_tickers.split(",") if t.strip()]
-
-if ticker_list:
-    with st.spinner("Finnhub & yFinance 최종 정밀 심층 스캐닝 중..."):
-        results, errors = [], []
-        for t in ticker_list:
-            res = analyze_ticker_ultimate(t)
-            if "error" in res: errors.append(res["error"])
-            else: results.append(res)
+# 윗꼬리 판별 함수
+def is_long_upper_shadow(candle):
+    open_p, close_p, high_p = candle['Open'], candle['Close'], candle['High']
+    # .item()을 사용하여 Series 1차원 데이터를 안전하게 스칼라값으로 변환
+    if isinstance(open_p, pd.Series): open_p = open_p.item()
+    if isinstance(close_p, pd.Series): close_p = close_p.item()
+    if isinstance(high_p, pd.Series): high_p = high_p.item()
     
-    if errors:
-        for err in errors: st.error(err)
+    body = abs(open_p - close_p)
+    if body == 0: body = 1 # 0으로 나누는 것 방지 (도지 캔들)
+    upper_shadow = high_p - max(open_p, close_p)
+    
+    # 윗꼬리가 몸통보다 1.5배 이상 길면 True (위험)
+    return upper_shadow > (body * 1.5)
 
-    if results:
-        df_res = pd.DataFrame(results).sort_values(by="score", ascending=False).reset_index(drop=True)
+# 하락 갭(Gap Down) 저항선 찾기 함수
+def find_recent_falling_gap(df, days_lookback=20):
+    gap_resistance = None
+    for i in range(len(df) - days_lookback, len(df) - 2):
+        prev_low = df['Low'].iloc[i-1]
+        curr_high = df['High'].iloc[i]
+        
+        # Series인 경우 값 추출
+        if isinstance(prev_low, pd.Series): prev_low = prev_low.item()
+        if isinstance(curr_high, pd.Series): curr_high = curr_high.item()
+        
+        if curr_high < prev_low:
+            gap_resistance = prev_low # 하락 갭의 상단을 저항선으로 설정
+    return gap_resistance
 
-        st.subheader("🏆 궁극의 AI 스캐너 종합 랭킹")
-        st.dataframe(
-            df_res[['ticker', 'tier', 'score', 'price', 'gap', 'dollar_vol']].style.format({
-                'price': '${:.2f}', 'gap': '{:+.2f}%', 'dollar_vol': '${:,.0f}'
-            }), 
-            use_container_width=True, hide_index=True
-        )
+def analyze_pattern(df):
+    if len(df) < 65:
+        return "데이터 부족"
+    
+    df['Trading_Value'] = df['Close'] * df['Volume']
+    df['Vol_60MA'] = df['Volume'].rolling(window=60).mean()
+    
+    day_0 = df.iloc[-2]
+    day_1 = df.iloc[-1]
+    
+    # [추가 조건 2] 윗꼬리 필터링 (Day 0, Day 1 모두 체크)
+    if is_long_upper_shadow(day_0) or is_long_upper_shadow(day_1):
+        return "패스: 🚨 [위험] 일봉 상 악성 윗꼬리 발생"
+        
+    # [추가 조건 1] 하락 시 거래량 폭발 필터링 (빠지면서 내려와야 함)
+    day_1_close = day_1['Close'].item() if isinstance(day_1['Close'], pd.Series) else day_1['Close']
+    day_0_close = day_0['Close'].item() if isinstance(day_0['Close'], pd.Series) else day_0['Close']
+    day_1_vol = day_1['Volume'].item() if isinstance(day_1['Volume'], pd.Series) else day_1['Volume']
+    day_0_vol = day_0['Volume'].item() if isinstance(day_0['Volume'], pd.Series) else day_0['Volume']
+    
+    if day_1_close < day_0_close and day_1_vol >= day_0_vol:
+        return "패스: 🚨 [위험] 하락 중 거래량 증가 (세력 이탈 의심)"
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.subheader("🔬 종목 심층 리포트")
-        selected_ticker = st.selectbox("리포트를 확인할 종목 선택", df_res['ticker'].tolist())
-        data = next(item for item in results if item['ticker'] == selected_ticker)
-        
-        st.markdown('<div class="card-container">', unsafe_allow_html=True)
-        
-        c1, c2 = st.columns([7, 3])
-        with c1:
-            st.markdown(f"## {data['ticker']} <span style='font-size:18px;'>({data['tier']})</span>", unsafe_allow_html=True)
-        with c2:
-            score_color = "val-green" if data['score'] >= 85 else ("val-yellow" if data['score'] >= 45 else "val-red")
-            st.markdown(f"<div style='text-align: right;'><span style='font-size: 16px; color: #888;'>분석 총점</span><br><span class='{score_color}' style='font-size: 38px;'>{data['score']}</span></div>", unsafe_allow_html=True)
-        
-        # 1. 스코어 상세 표
-        html_table = "<table class='score-table'><thead><tr><th style='width:15%'>카테고리</th><th style='width:20%'>평가 항목</th><th style='width:15%'>점수 / 알파</th><th style='width:50%'>분석 근거 (Rationale)</th></tr></thead><tbody>"
-        
-        for item in data['details']:
-            if "PRO" in item['cat']:
-                if item['score'].startswith('-'): sc_html = f"<span class='val-red'>{item['score']}</span>"
-                else: sc_html = f"<span class='val-blue'>{item['score']}</span>"
-            else:
-                if item['score'].startswith('0'): sc_html = f"<span class='val-red'>{item['score']}</span>"
-                elif float(item['score'].split('/')[0].strip()) == float(item['score'].split('/')[1].strip()): sc_html = f"<span class='val-green'>{item['score']}</span>"
-                else: sc_html = f"<span style='color:#ccc;'>{item['score']}</span>"
-                
-            html_table += f"<tr><td><b>{item['cat']}</b></td><td>{item['item']}</td><td>{sc_html}</td><td>{item['reason']}</td></tr>"
-            
-        html_table += "</tbody></table>"
-        st.markdown(html_table, unsafe_allow_html=True)
+    # [추가 조건 3] 갭(Gap) 돌파 스윙 타점 체크
+    gap_resistance = find_recent_falling_gap(df)
+    day_1_open = day_1['Open'].item() if isinstance(day_1['Open'], pd.Series) else day_1['Open']
+    
+    if gap_resistance and day_1_open > gap_resistance:
+        return f"🚀 [스윙 타점] 철벽같던 하락 갭 저항선({gap_resistance:,.0f}원)을 갭상승으로 돌파!"
 
-        # 2. 뉴스 모멘텀 분석 UI
-        if data.get('news_data'):
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("### 📰 최근 핵심 뉴스 및 재료 분석")
-            for news in data['news_data']:
-                st.markdown(f"""
-                <div class='news-card' style='border-left: 5px solid {news['color']};'>
-                    <div style='font-size: 13px; color: #aaa; margin-bottom: 6px;'>
-                        <span style='color: {news['color']}; font-weight: bold;'>{news['sentiment']}</span> 
-                        &nbsp;|&nbsp; 출처: {news['publisher']}
-                    </div>
-                    <a href='{news['link']}' target='_blank' style='color: #fff; text-decoration: none; font-size: 16px; font-weight: 500;'>
-                        {news['title']}
-                    </a>
-                </div>
-                """, unsafe_allow_html=True)
+    # --- 기존 조건 확인 ---
+    past_60 = df.iloc[-62:-2]
+    avg_trading_value = past_60['Trading_Value'].mean().item() if isinstance(past_60['Trading_Value'].mean(), pd.Series) else past_60['Trading_Value'].mean()
+    
+    if avg_trading_value > target_value:
+        return f"패스: 3개월 횡보/저유동성 조건 미달"
+        
+    vol_60ma = day_0['Vol_60MA'].item() if isinstance(day_0['Vol_60MA'], pd.Series) else day_0['Vol_60MA']
+    if day_0_vol < vol_60ma * volume_spike_ratio:
+        return "패스: Day 0 첫 거래량 폭발 조건 미달"
+        
+    day_0_open = day_0['Open'].item() if isinstance(day_0['Open'], pd.Series) else day_0['Open']
+    
+    day_0_is_yang = day_0_close > day_0_open
+    day_1_is_yin = day_1_close < day_1_open
+    day_1_is_yang = day_1_close > day_1_open
+    
+    vol_drop_ratio = day_1_vol / day_0_vol
+    
+    if day_0_is_yang:
+        if day_1_is_yin and vol_drop_ratio < 0.3:
+            return "🔥 [눌림목 진입] 양봉 폭등 후 강한 음봉 + 거래량 70% 이상 급감 (숨 고르기)"
         else:
-            st.markdown("<br><p style='color:#888;'>최근 발표된 주요 뉴스가 없습니다. (단순 세력 수급일 가능성 농후)</p>", unsafe_allow_html=True)
-
-        # 3. 핵심 결함 (참고용 블랙리스트)
-        if data.get('red_flags'):
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("### ⚠️ 동전주 기업 실체 및 치명적 리스크")
+            return "패스: 양봉 이후 조건 불일치"
             
-            rf_html = """
-            <table class='rf-table'>
-                <thead>
-                    <tr>
-                        <th style='width:20%'>특이 사항</th>
-                        <th style='width:55%'>기업 실체 (Reality)</th>
-                        <th style='width:25%'>매매 가이드</th>
-                    </tr>
-                </thead>
-                <tbody>
-            """
-            for rf in data['red_flags']:
-                guide_color = "val-red" if "금지" in rf['가이드'] else "val-yellow"
-                rf_html += f"<tr><td><b>{rf['결함']}</b></td><td>{rf['실체']}</td><td class='{guide_color}'>{rf['가이드']}</td></tr>"
-                
-            rf_html += "</tbody></table>"
-            st.markdown(rf_html, unsafe_allow_html=True)
+    else: 
+        if day_1_is_yin and vol_drop_ratio < 0.2:
+            target_price = day_0_close * 0.6
+            return f"🔥 [타점 대기] 음봉마감 후 거래량 소멸. 목표 진입가: 약 {target_price:,.0f}원 부근"
+        elif vol_drop_ratio >= 0.8 and (abs(day_1_close - day_1_open) / day_1_open < 0.02):
+            return "패스: 🚨 거래량 유지 + 약한 움직임 (설거지 가능성)"
+        elif vol_drop_ratio > 1.0 and day_1_is_yang:
+            return "🔥 [진입 후 보유] 음봉 이후 거래량 증가 + 약한 양봉 출현"
+        else:
+            return "패스: 일치하는 시나리오 없음"
 
-        st.markdown('</div>', unsafe_allow_html=True)
+if st.button("조건 검색 실행"):
+    with st.spinner("최신 데이터 다운로드 및 패턴 분석 중..."):
+        results = []
+        for ticker in tickers:
+            try:
+                df = fetch_data(ticker)
+                status = analyze_pattern(df)
+                results.append({"종목(Ticker)": ticker, "분석 결과": status})
+            except Exception as e:
+                results.append({"종목(Ticker)": ticker, "분석 결과": f"오류 발생: {str(e)}"})
+                
+        result_df = pd.DataFrame(results)
+        
+        st.subheader("📊 검색 결과")
+        
+        # 타점이나 스윙 자리가 발견된 종목은 눈에 띄게 하이라이트 처리
+        def highlight_rows(val):
+            if "위험" in str(val) or "설거지" in str(val):
+                return "background-color: #ffe6e6; color: #cc0000"
+            elif "스윙" in str(val):
+                return "background-color: #e6f2ff; color: #0000ff; font-weight: bold"
+            elif "타점" in str(val) or "진입" in str(val):
+                return "background-color: #e6ffe6; color: #006600; font-weight: bold"
+            return ""
+            
+        st.dataframe(result_df.style.applymap(highlight_rows, subset=['분석 결과']), use_container_width=True)
