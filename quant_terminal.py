@@ -1,153 +1,148 @@
 import streamlit as st
 import yfinance as yf
+import plotly.graph_objects as go
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-st.set_page_config(page_title="급등주 2차 타점 검색기 PRO", layout="wide")
-st.title("🚀 급등주 2차 타점 검색기 PRO (갭돌파 & 윗꼬리 필터링)")
+st.set_page_config(page_title="급등주 추적기 v3", layout="wide")
 
-st.markdown("""
-**[핵심 매매 철학]**  
-1. 첫 거래량 폭발은 패스, 두 번째 기회를 노린다.
-2. 하락 시 거래량은 무조건 줄어야 한다. 터지면 위험!
-3. 윗꼬리가 긴 캔들은 악성 매물이므로 피한다.
-4. 강력한 저항인 '하락 갭'을 갭상승으로 돌파하면 스윙(Swing) 기회다.
-""")
+st.title("📈 미국 당일 급등주 완벽 분석기 (세력선, 이평선, 갭, 분할)")
+st.write("5분봉 세력선, 224선/60분봉 20선, 이전 갭상승/하락 지지저항선, 액면분할 여부를 모두 표시합니다.")
 
-# 사이드바 설정
-st.sidebar.header("검색 조건 설정")
-target_value = st.sidebar.number_input("기준 거래대금 (원)", value=1000000000, step=100000000)
-volume_spike_ratio = st.sidebar.slider("첫날 거래량 급등 기준 (몇 배?)", 2.0, 10.0, 5.0)
+# 티커 입력
+ticker = st.text_input("검색할 미국 주식 티커를 입력하세요 (예: TSLA, NVDA, AAPL):", "TSLA").upper()
 
-tickers_input = st.sidebar.text_area("종목 티커 입력 (쉼표로 구분)", "005930.KS, 035420.KS, 035720.KS, 000660.KS")
-tickers = [t.strip() for t in tickers_input.split(",")]
-
-@st.cache_data(ttl=3600)
-def fetch_data(ticker):
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=180)
-    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-    return df
-
-# 윗꼬리 판별 함수
-def is_long_upper_shadow(candle):
-    open_p, close_p, high_p = candle['Open'], candle['Close'], candle['High']
-    # .item()을 사용하여 Series 1차원 데이터를 안전하게 스칼라값으로 변환
-    if isinstance(open_p, pd.Series): open_p = open_p.item()
-    if isinstance(close_p, pd.Series): close_p = close_p.item()
-    if isinstance(high_p, pd.Series): high_p = high_p.item()
+if ticker:
+    # 데이터 로드 (과거 갭과 이평선을 위해 10일치 가져오기)
+    stock = yf.Ticker(ticker)
+    df = stock.history(period="10d", interval="5m")
     
-    body = abs(open_p - close_p)
-    if body == 0: body = 1 # 0으로 나누는 것 방지 (도지 캔들)
-    upper_shadow = high_p - max(open_p, close_p)
-    
-    # 윗꼬리가 몸통보다 1.5배 이상 길면 True (위험)
-    return upper_shadow > (body * 1.5)
+    # 액면분할 이력 가져오기
+    splits = stock.splits
 
-# 하락 갭(Gap Down) 저항선 찾기 함수
-def find_recent_falling_gap(df, days_lookback=20):
-    gap_resistance = None
-    for i in range(len(df) - days_lookback, len(df) - 2):
-        prev_low = df['Low'].iloc[i-1]
-        curr_high = df['High'].iloc[i]
+    if not df.empty:
+        df = df.copy()
         
-        # Series인 경우 값 추출
-        if isinstance(prev_low, pd.Series): prev_low = prev_low.item()
-        if isinstance(curr_high, pd.Series): curr_high = curr_high.item()
-        
-        if curr_high < prev_low:
-            gap_resistance = prev_low # 하락 갭의 상단을 저항선으로 설정
-    return gap_resistance
+        # --- [1. 지표 추가 파트] ---
+        # 5분봉 224선 & 60분봉 20선(5분 240선)
+        df['MA_224'] = df['Close'].rolling(window=224).mean()
+        df['MA_240'] = df['Close'].rolling(window=240).mean()
 
-def analyze_pattern(df):
-    if len(df) < 65:
-        return "데이터 부족"
-    
-    df['Trading_Value'] = df['Close'] * df['Volume']
-    df['Vol_60MA'] = df['Volume'].rolling(window=60).mean()
-    
-    day_0 = df.iloc[-2]
-    day_1 = df.iloc[-1]
-    
-    # [추가 조건 2] 윗꼬리 필터링 (Day 0, Day 1 모두 체크)
-    if is_long_upper_shadow(day_0) or is_long_upper_shadow(day_1):
-        return "패스: 🚨 [위험] 일봉 상 악성 윗꼬리 발생"
+        # --- [2. 이전 갭상승 / 갭하락 구간 찾기] ---
+        # 일자별 첫 시가와 마지막 종가를 구해 갭을 계산합니다.
+        df['Date'] = df.index.date
+        daily_summary = df.groupby('Date').agg({'Open': 'first', 'Close': 'last'})
+        daily_summary['Prev_Close'] = daily_summary['Close'].shift(1)
         
-    # [추가 조건 1] 하락 시 거래량 폭발 필터링 (빠지면서 내려와야 함)
-    day_1_close = day_1['Close'].item() if isinstance(day_1['Close'], pd.Series) else day_1['Close']
-    day_0_close = day_0['Close'].item() if isinstance(day_0['Close'], pd.Series) else day_0['Close']
-    day_1_vol = day_1['Volume'].item() if isinstance(day_1['Volume'], pd.Series) else day_1['Volume']
-    day_0_vol = day_0['Volume'].item() if isinstance(day_0['Volume'], pd.Series) else day_0['Volume']
-    
-    if day_1_close < day_0_close and day_1_vol >= day_0_vol:
-        return "패스: 🚨 [위험] 하락 중 거래량 증가 (세력 이탈 의심)"
+        # 갭 퍼센트 계산: (당일 시가 - 전일 종가) / 전일 종가 * 100
+        daily_summary['Gap_Pct'] = (daily_summary['Open'] - daily_summary['Prev_Close']) / daily_summary['Prev_Close'] * 100
+        
+        gap_up_zones = []
+        gap_down_zones = []
+        
+        for date, row in daily_summary.iterrows():
+            if pd.isna(row['Prev_Close']): continue
+            # 0.5% 이상 차이나면 의미 있는 갭으로 판단
+            if row['Gap_Pct'] >= 0.5:
+                gap_up_zones.append((row['Prev_Close'], row['Open'], date))
+            elif row['Gap_Pct'] <= -0.5:
+                gap_down_zones.append((row['Open'], row['Prev_Close'], date)) # 아래가 Open, 위가 Prev_Close
 
-    # [추가 조건 3] 갭(Gap) 돌파 스윙 타점 체크
-    gap_resistance = find_recent_falling_gap(df)
-    day_1_open = day_1['Open'].item() if isinstance(day_1['Open'], pd.Series) else day_1['Open']
-    
-    if gap_resistance and day_1_open > gap_resistance:
-        return f"🚀 [스윙 타점] 철벽같던 하락 갭 저항선({gap_resistance:,.0f}원)을 갭상승으로 돌파!"
-
-    # --- 기존 조건 확인 ---
-    past_60 = df.iloc[-62:-2]
-    avg_trading_value = past_60['Trading_Value'].mean().item() if isinstance(past_60['Trading_Value'].mean(), pd.Series) else past_60['Trading_Value'].mean()
-    
-    if avg_trading_value > target_value:
-        return f"패스: 3개월 횡보/저유동성 조건 미달"
+        # --- [3. 당일 데이터 추출 파트] ---
+        last_date = df.index[-1].date()
+        df_today = df[df.index.date == last_date].copy()
         
-    vol_60ma = day_0['Vol_60MA'].item() if isinstance(day_0['Vol_60MA'], pd.Series) else day_0['Vol_60MA']
-    if day_0_vol < vol_60ma * volume_spike_ratio:
-        return "패스: Day 0 첫 거래량 폭발 조건 미달"
-        
-    day_0_open = day_0['Open'].item() if isinstance(day_0['Open'], pd.Series) else day_0['Open']
-    
-    day_0_is_yang = day_0_close > day_0_open
-    day_1_is_yin = day_1_close < day_1_open
-    day_1_is_yang = day_1_close > day_1_open
-    
-    vol_drop_ratio = day_1_vol / day_0_vol
-    
-    if day_0_is_yang:
-        if day_1_is_yin and vol_drop_ratio < 0.3:
-            return "🔥 [눌림목 진입] 양봉 폭등 후 강한 음봉 + 거래량 70% 이상 급감 (숨 고르기)"
-        else:
-            return "패스: 양봉 이후 조건 불일치"
+        if not df_today.empty:
+            df_today['Body'] = df_today['Close'] - df_today['Open']
+            df_today['Surge_Score'] = df_today.apply(lambda x: x['Body'] * x['Volume'] if x['Body'] > 0 else 0, axis=1)
             
-    else: 
-        if day_1_is_yin and vol_drop_ratio < 0.2:
-            target_price = day_0_close * 0.6
-            return f"🔥 [타점 대기] 음봉마감 후 거래량 소멸. 목표 진입가: 약 {target_price:,.0f}원 부근"
-        elif vol_drop_ratio >= 0.8 and (abs(day_1_close - day_1_open) / day_1_open < 0.02):
-            return "패스: 🚨 거래량 유지 + 약한 움직임 (설거지 가능성)"
-        elif vol_drop_ratio > 1.0 and day_1_is_yang:
-            return "🔥 [진입 후 보유] 음봉 이후 거래량 증가 + 약한 양봉 출현"
-        else:
-            return "패스: 일치하는 시나리오 없음"
-
-if st.button("조건 검색 실행"):
-    with st.spinner("최신 데이터 다운로드 및 패턴 분석 중..."):
-        results = []
-        for ticker in tickers:
-            try:
-                df = fetch_data(ticker)
-                status = analyze_pattern(df)
-                results.append({"종목(Ticker)": ticker, "분석 결과": status})
-            except Exception as e:
-                results.append({"종목(Ticker)": ticker, "분석 결과": f"오류 발생: {str(e)}"})
+            if df_today['Surge_Score'].max() > 0:
+                surge_idx = df_today['Surge_Score'].idxmax()
+                surge_open = df_today.loc[surge_idx, 'Open']
                 
-        result_df = pd.DataFrame(results)
-        
-        st.subheader("📊 검색 결과")
-        
-        # 타점이나 스윙 자리가 발견된 종목은 눈에 띄게 하이라이트 처리
-        def highlight_rows(val):
-            if "위험" in str(val) or "설거지" in str(val):
-                return "background-color: #ffe6e6; color: #cc0000"
-            elif "스윙" in str(val):
-                return "background-color: #e6f2ff; color: #0000ff; font-weight: bold"
-            elif "타점" in str(val) or "진입" in str(val):
-                return "background-color: #e6ffe6; color: #006600; font-weight: bold"
-            return ""
-            
-       st.dataframe(result_df.style.map(highlight_rows, subset=['분석 결과']), use_container_width=True)
+                before_surge = df_today.loc[:surge_idx]
+                if len(before_surge) > 1:
+                    base_open = before_surge.iloc[0]['Open']
+                else:
+                    base_open = df_today.iloc[0]['Open']
+
+                # --- [4. 차트 그리기 파트 (Plotly)] ---
+                fig = go.Figure()
+
+                # 캔들 추가
+                fig.add_trace(go.Candlestick(x=df_today.index,
+                                open=df_today['Open'],
+                                high=df_today['High'],
+                                low=df_today['Low'],
+                                close=df_today['Close'],
+                                name='5분봉'))
+
+                # 이평선 추가
+                fig.add_trace(go.Scatter(x=df_today.index, y=df_today['MA_224'], 
+                                         mode='lines', line=dict(color='orange', width=1.5), name='5분봉 224선'))
+                fig.add_trace(go.Scatter(x=df_today.index, y=df_today['MA_240'], 
+                                         mode='lines', line=dict(color='purple', width=1.5), name='60분봉 20선 (240선)'))
+
+                # 세력선 & 횡보 시가 수평선 추가
+                fig.add_hline(y=base_open, line_dash="dash", line_color="blue", 
+                              annotation_text="급등 전 횡보 시가", annotation_position="bottom right", annotation_font_color="blue")
+                fig.add_hline(y=surge_open, line_dash="solid", line_color="red", 
+                              annotation_text="세력선 시가", annotation_position="top right", annotation_font_color="red")
+
+                # 갭상승 구간 표시 (최근 3개까지만 표시하여 차트 깔끔하게 유지)
+                for prev_c, open_p, date in gap_up_zones[-3:]:
+                    fig.add_hrect(y0=prev_c, y1=open_p, fillcolor="rgba(0, 255, 0, 0.15)", line_width=0, 
+                                  annotation_text=f"갭상승 지지구간({date.strftime('%m/%d')})", annotation_position="top left")
+
+                # 갭하락 구간 표시
+                for open_p, prev_c, date in gap_down_zones[-3:]:
+                    fig.add_hrect(y0=open_p, y1=prev_c, fillcolor="rgba(0, 191, 255, 0.15)", line_width=0, 
+                                  annotation_text=f"갭하락 저항구간({date.strftime('%m/%d')})", annotation_position="bottom left")
+
+                # 액면분할 당일일 경우 세로선 표시
+                split_msg = "최근 액면분할 이력 없음 (또는 데이터 없음)"
+                if not splits.empty:
+                    last_split_date = splits.index[-1]
+                    last_split_ratio = splits.iloc[-1]
+                    
+                    # 날짜 텍스트 처리
+                    try:
+                        ls_date_str = last_split_date.strftime('%Y-%m-%d')
+                    except:
+                        ls_date_str = str(last_split_date)[:10]
+                        
+                    split_msg = f"{ls_date_str} (비율 1 : {last_split_ratio})"
+                    
+                    # 만약 차트 당일(Today)이 액면분할 적용일이라면 수직선 긋기
+                    if str(last_date) == ls_date_str:
+                        fig.add_vline(x=df_today.index[0], line_dash="dash", line_color="yellow", 
+                                      annotation_text="⭐ 액면분할 적용일", annotation_position="top left", annotation_font_color="yellow")
+
+                # 차트 레이아웃
+                fig.update_layout(title=f"{ticker} 5분봉 당일 분석 차트",
+                                  yaxis_title="가격 (USD)",
+                                  xaxis_rangeslider_visible=False,
+                                  height=700,
+                                  template="plotly_dark",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # --- [5. 하단 데이터 요약 파트] ---
+                st.markdown(f"**💡 {ticker} 분석 요약 ({last_date})**")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"- **급등 전 횡보 시가:** ${base_open:.2f}")
+                    st.markdown(f"- **세력선 시가:** ${surge_open:.2f} ({surge_idx.strftime('%H:%M')} 발생)")
+                    st.markdown(f"- **최근 액면분할:** {split_msg}")
+                with col2:
+                    st.markdown(f"- **현재 5분봉 224선:** ${df_today['MA_224'].iloc[-1]:.2f}")
+                    st.markdown(f"- **현재 60분봉 20선:** ${df_today['MA_240'].iloc[-1]:.2f}")
+                
+            else:
+                st.warning("오늘 의미 있는 상승(양봉) 캔들이 없습니다.")
+        else:
+            st.error("당일 데이터를 추출할 수 없습니다.")
+    else:
+        st.error("데이터를 불러올 수 없습니다. 장이 열려있지 않거나 티커가 잘못되었습니다.")
